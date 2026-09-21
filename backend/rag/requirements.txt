@@ -1,0 +1,5 @@
+rank_bm25==0.2.2
+numpy==1.26.4
+scikit-learn==1.5.2
+anthropic==0.40.0
+boto3>=1.36.0

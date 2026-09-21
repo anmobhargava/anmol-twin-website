@@ -1,0 +1,144 @@
+name: Deploy twin website
+
+# Triggers on ANY change that should result in a redeploy:
+# - corpus/**  -> new index content, needs build_index.py re-run
+# - backend/** -> code changes, needs a new Lambda image
+# - Dockerfile -> the image build itself changed
+# - frontend/** -> the static site itself changed, needs a fresh S3 sync
+# - infra/website/** -> infra config itself changed
+on:
+  push:
+    branches: [main]
+    paths:
+      - "corpus/**"
+      - "backend/**"
+      - "Dockerfile"
+      - "frontend/**"
+      - "infra/website/**"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # GAP FIX 1 of 4: the old version of this workflow never actually ran
+      # build_index.py at all -- meaning even a fully successful CI run
+      # would leave S3 Vectors' "corpus" index stale, never picking up
+      # corpus/ changes. Runs independently of (and can happen in any order
+      # relative to) the Lambda image deploy below -- build_index.py only
+      # touches S3 Vectors directly; it doesn't go through Lambda at all.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: pip install -r backend/rag/requirements.txt
+
+      - name: Rebuild S3 Vectors index
+        working-directory: backend
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python build_index.py ${{ vars.VECTOR_BUCKET_NAME }}
+
+      # Ensures the ECR repo exists BEFORE we try to push an image to it --
+      # a targeted apply, touching only this one resource. Idempotent: if
+      # the repo already exists (every run after the very first), this is
+      # a fast no-op. See lambda.tf's own comment for the full chicken-
+      # and-egg reasoning (the Lambda function's image_uri needs an image
+      # to already exist in ECR, but the ECR repo itself needs Terraform
+      # to create it first).
+      - name: Ensure ECR repository exists
+        working-directory: infra/website
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -target=aws_ecr_repository.twin_chat \
+            -var="domain_name=${{ vars.DOMAIN_NAME }}" \
+            -var="anthropic_api_key=${{ secrets.ANTHROPIC_API_KEY }}" \
+            -var="vector_bucket_name=${{ vars.VECTOR_BUCKET_NAME }}"
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr_login
+
+      # Constructed directly from the AWS account ID + the known naming
+      # pattern ("${project_name}-chat", matching lambda.tf's
+      # aws_ecr_repository.twin_chat.name) rather than read via `terraform
+      # output` -- outputs that reference resources OTHER than the one
+      # just targeted above aren't reliably available yet at this point in
+      # a partial apply, so this sidesteps that fragility entirely.
+      - name: Determine ECR repository URI
+        id: ecr_uri
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "uri=${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/twin-website-chat" >> "$GITHUB_OUTPUT"
+
+      # GAP FIX 2 of 4: --provenance=false is required for Lambda to accept
+      # the pushed image at all -- without it, Docker's default BuildKit
+      # attestation format produces an OCI image manifest Lambda's runtime
+      # rejects outright. This was a real deploy failure caught earlier in
+      # this project, and the old workflow never had the fix applied.
+      - name: Build and push Lambda container image
+        run: |
+          docker build --provenance=false -t ${{ steps.ecr_uri.outputs.uri }}:latest .
+          docker push ${{ steps.ecr_uri.outputs.uri }}:latest
+
+      # Now that a real "latest"-tagged image exists in ECR, the full
+      # apply's data.aws_ecr_image lookup (in lambda.tf) will succeed, and
+      # everything else -- the Lambda function itself, API Gateway,
+      # CloudFront, Route 53 -- gets created or updated.
+      #
+      # GAP FIX 3 of 4: vector_bucket_name is passed explicitly here (and
+      # above) rather than relying on Terraform's default value -- the old
+      # workflow never passed it at all, which happened to still work only
+      # because the default matched what was manually created via CLI.
+      # Relying on that silently matching forever is fragile; passing it
+      # explicitly from a repo variable makes the real dependency visible.
+      - name: Terraform apply (full stack)
+        id: tf
+        working-directory: infra/website
+        run: |
+          terraform apply -auto-approve \
+            -var="domain_name=${{ vars.DOMAIN_NAME }}" \
+            -var="anthropic_api_key=${{ secrets.ANTHROPIC_API_KEY }}" \
+            -var="vector_bucket_name=${{ vars.VECTOR_BUCKET_NAME }}"
+
+      - name: Get Terraform outputs
+        id: tf_outputs
+        working-directory: infra/website
+        run: |
+          echo "api_url=$(terraform output -raw api_invoke_url)" >> "$GITHUB_OUTPUT"
+          echo "bucket=$(terraform output -raw frontend_bucket_name)" >> "$GITHUB_OUTPUT"
+          echo "distribution_id=$(terraform output -raw cloudfront_distribution_id)" >> "$GITHUB_OUTPUT"
+
+      # Injects the real API URL into config.js right before upload --
+      # config.js in the repo itself keeps its REPLACE-ME placeholder, since
+      # the real URL is only known after Terraform has run.
+      - name: Inject API URL into frontend config
+        run: |
+          sed -i "s|https://REPLACE-ME.execute-api.us-east-1.amazonaws.com|${{ steps.tf_outputs.outputs.api_url }}|" frontend/config.js
+
+      - name: Deploy frontend to S3
+        run: |
+          aws s3 sync frontend/ s3://${{ steps.tf_outputs.outputs.bucket }}/ --delete --exclude "*.md"
+
+      # GAP FIX 4 of 4: without this, every automated frontend deploy would
+      # hit the EXACT stale-cache problem debugged by hand earlier in this
+      # project -- CloudFront keeps serving old cached files even after S3
+      # has the new ones, until its cache is explicitly invalidated. The
+      # old workflow ended at the sync step above with no invalidation at
+      # all, meaning this bug would have resurfaced on every single
+      # automated deploy going forward.
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ steps.tf_outputs.outputs.distribution_id }} \
+            --paths "/*"

@@ -1,0 +1,48 @@
+# --- Python (backend/, build_index.py, etc.) ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# --- Terraform (infra/bootstrap/, infra/website/) ---
+# .terraform/ is the provider plugin cache -- large, and regenerated fresh
+# by `terraform init` on any machine, so tracking it is pure bloat.
+.terraform/
+# State files are NOT tracked here at all, on purpose -- this project uses
+# a remote S3 backend (infra/website/backend.tf, infra/bootstrap/main.tf)
+# specifically so state lives in S3, not in git. These patterns just catch
+# any stray local .tfstate that might exist from before the backend was
+# configured, or a backup copy Terraform creates automatically.
+*.tfstate
+*.tfstate.*
+# The real file with your actual Anthropic API key -- this is the single
+# most important line in this whole file. terraform.tfvars.example (no
+# trailing extension match here) stays tracked, since it has placeholder
+# values only.
+terraform.tfvars
+# Terraform occasionally writes a crash log with full variable values
+# (including secrets) if a run fails unexpectedly -- never want this in git.
+crash.log
+
+# --- Docker ---
+# Nothing Docker-specific needed beyond what's already covered above --
+# the Dockerfile itself IS tracked (it's not a secret or a generated
+# artifact), and Docker doesn't leave build artifacts in this repo's
+# working directory the way node_modules or __pycache__ do.
+
+# --- Editor ---
+.vscode/
+.idea/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Local scratch/test files ---
+# Matches the pattern used throughout this project's own testing --
+# ad-hoc test_*.py scripts created and deleted during development. Not
+# meant to be permanent, shouldn't accidentally get committed if one is
+# left behind.
+test_*.py
