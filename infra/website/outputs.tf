@@ -22,3 +22,8 @@ output "site_url" {
   value       = "https://${var.domain_name}"
   description = "The final, real URL once DNS has propagated"
 }
+
+output "cloudfront_distribution_id" {
+  value       = aws_cloudfront_distribution.frontend.id
+  description = "Use this for cache invalidation after uploading new frontend files: aws cloudfront create-invalidation --distribution-id <this> --paths \"/*\""
+}
