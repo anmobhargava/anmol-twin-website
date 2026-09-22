@@ -15,6 +15,32 @@ resource "aws_ecr_repository" "twin_chat" {
   image_tag_mutability = "MUTABLE"
 }
 
+# Without this, ECR keeps every pushed image indefinitely, even after a
+# new "latest" push -- a new tag doesn't delete the image it replaced, it
+# just moves the tag pointer. Every docker push in this project (and there
+# have been many, across debugging sessions and CI runs) accumulates real,
+# ongoing storage cost with nothing ever pruning it automatically. This
+# caps the repo at the 5 most recent images -- generous headroom for
+# rollback if ever needed, while stopping unbounded growth.
+resource "aws_ecr_lifecycle_policy" "twin_chat" {
+  repository = aws_ecr_repository.twin_chat.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep only the 5 most recent images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 5
+      }
+      action = {
+        type = "expire"
+      }
+    }]
+  })
+}
+
 # Looks up the digest of whatever image is currently tagged "latest" in
 # ECR. Referencing the DIGEST (not just the "latest" tag string) in the
 # Lambda function below is what makes Terraform correctly detect a new
@@ -102,10 +128,9 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "conversation_logs
   }
 }
 
-# Narrowly scoped: PutObject only, on this ONE bucket, nothing else. The
-# Lambda function never needs to read, list, or delete conversation logs --
-# only write new ones -- so the permission granted matches exactly that,
-# not a broader S3 access policy.
+# GetObject and ListBucket added after a real deploy failure:
+# _load_session() in lambda_handler.py reads session files back (not just
+# writes them), but the original policy only ever granted PutObject.
 resource "aws_iam_role_policy" "lambda_conversation_log_write" {
   name = "${var.project_name}-conversation-log-write"
   role = aws_iam_role.lambda_exec.id
@@ -115,7 +140,10 @@ resource "aws_iam_role_policy" "lambda_conversation_log_write" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["s3:PutObject", "s3:GetObject", "s3:ListBucket"]
-      Resource = "${aws_s3_bucket.conversation_logs.arn}/*"
+      Resource = [
+        aws_s3_bucket.conversation_logs.arn,
+        "${aws_s3_bucket.conversation_logs.arn}/*",
+      ]
     }]
   })
 }
@@ -143,24 +171,17 @@ resource "aws_iam_role_policy" "lambda_bedrock_embeddings" {
 # NOT managed by Terraform -- aws_s3vectors_vector_bucket requires AWS
 # provider v6.24+, and this project is pinned to v5.x. Bumping to v6 would
 # be a major-version upgrade risking breaking changes across every OTHER
-# resource in this config (Lambda, S3, CloudFront, Route 53, ACM, IAM,
-# ECR, API Gateway, Kinesis Firehose), not just this one new resource --
-# too large a blast radius to take on for one bucket. Instead, this bucket
-# is created ONCE, manually, via the AWS CLI (see the README/deploy notes
-# for the exact command) -- the same way domain registration itself is a
-# manual, outside-Terraform step. var.vector_bucket_name just has to match
-# whatever name was used when creating it.
-#
-# The ARN is constructed manually here (matching AWS's documented S3
-# Vectors ARN format) since there's no Terraform resource to read an .arn
-# attribute from.
+# resource in this config. Instead, this bucket is created ONCE, manually,
+# via the AWS CLI. var.vector_bucket_name just has to match whatever name
+# was used when creating it.
 locals {
   vector_bucket_arn = "arn:aws:s3vectors:${var.aws_region}:${data.aws_caller_identity.current.account_id}:bucket/${var.vector_bucket_name}"
 }
 
-# Scoped to exactly this vector bucket (and its indexes) -- CreateIndex,
-# PutVectors, QueryVectors, and ListVectors cover everything vector_store.py
-# and semantic_cache.py actually call; nothing broader.
+# GetVectors added after a real deploy failure: AWS's error for a denied
+# ListVectors API call explicitly named "s3vectors:GetVectors" as the
+# required IAM action -- the operation name and the IAM permission name
+# don't always match 1:1.
 resource "aws_iam_role_policy" "lambda_s3vectors" {
   name = "${var.project_name}-s3vectors"
   role = aws_iam_role.lambda_exec.id
@@ -190,17 +211,10 @@ resource "aws_lambda_function" "twin_chat" {
   role          = aws_iam_role.lambda_exec.arn
   package_type  = "Image"
 
-  # References the specific image DIGEST, not the mutable "latest" tag
-  # string -- see the data source comment above for why that distinction
-  # is what makes auto-redeploy-on-push actually work.
   image_uri = "${aws_ecr_repository.twin_chat.repository_url}@${data.aws_ecr_image.latest.image_digest}"
 
-  # Reverted to modest defaults -- the earlier 3008MB/60s was specifically
-  # compensating for torch + sentence-transformers' slow import time, which
-  # doesn't exist in this architecture anymore (Bedrock replaced the local
-  # embedding model, and connect() does no embedding/RAPTOR work at cold
-  # start at all -- see pipeline.py's own docstring). 512MB/15s is generous
-  # for what's now a lightweight cold start (a couple of S3 Vectors reads).
+  # 60s/512MB -- covers the real sequential LLM call chain (condense, HyDE,
+  # grading, final generation) a single request can make.
   timeout     = 60
   memory_size = 512
 
