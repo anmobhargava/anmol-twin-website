@@ -165,14 +165,15 @@ def current_trace_id() -> str | None:
         # trace_id is still usable after exiting -- it's just a plain
         # string now, no longer tied to the (now-closed) span
     """
-    return get_client().get_current_trace_id()
+    try:
+        return get_client().get_current_trace_id()
+    except Exception:
+        return None
+
 
 
 def flush():
-    """Langfuse batches and sends traces asynchronously -- in a
-    short-lived process (a script, a Lambda invocation) that exits right
-    after its work is done, un-flushed traces can be lost entirely if the
-    process ends before the background sender gets to them. Call this at
-    the end of any such process, same principle as flushing a file buffer
-    before closing it."""
-    get_client().flush()
+    try:
+        get_client().flush()
+    except Exception:
+        pass
