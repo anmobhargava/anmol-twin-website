@@ -137,15 +137,18 @@ def agent_run(agent_name: str, session_id: str | None = None, user_id: str | Non
         with agent_run("agent-25-graphrag", session_id=request_session_id):
             result = graph_pipeline.answer(question)
     """
-    client = get_client()
-    with client.start_as_current_observation(name=f"{agent_name}-run") as root_span:
-        with propagate_attributes(
-            tags=[agent_name],
-            metadata={"agent_name": agent_name},
-            session_id=session_id,
-            user_id=user_id,
-        ):
-            yield root_span
+    try:
+        client = get_client()
+        with client.start_as_current_observation(name=f"{agent_name}-run") as root_span:
+            with propagate_attributes(
+                tags=[agent_name],
+                metadata={"agent_name": agent_name},
+                session_id=session_id,
+                user_id=user_id,
+            ):
+                yield root_span
+    except Exception:
+        yield None
 
 
 def current_trace_id() -> str | None:
