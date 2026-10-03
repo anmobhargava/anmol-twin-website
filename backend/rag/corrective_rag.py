@@ -56,39 +56,22 @@ class CorrectiveGrader:
         return verdict.startswith("YES")
 
     def filter_relevant(self, question: str, chunks: list[Chunk]) -> list[Chunk]:
-        """Grades all candidate chunks CONCURRENTLY, not one at a time.
-        Each chunk's grade is independent of every other chunk's -- grading
-        chunk A never needs chunk B's result -- so there's no reason to wait
-        for one call to finish before starting the next. This was a real,
-        measured latency problem: with up to 4 retrieved chunks, sequential
-        grading meant up to 4 full round-trips to Claude stacked back to
-        back, on top of condensation + HyDE + final generation. Parallel
-        grading turns that into roughly the time of the SLOWEST single
-        grading call, not the sum of all of them.
-
-        Results are reassembled in the ORIGINAL retrieval-rank order
-        (not completion order, which is nondeterministic) -- parallelizing
-        the calls and preserving output order are separate concerns, and
-        keeping the original rank order matters for what the final
-        generation prompt sees first."""
         if not chunks:
             return []
-        # contextvars.copy_context() matters here specifically because of
-        # @traced_llm_call on grade(): Langfuse's trace context (which
-        # observation is "current") is carried via Python contextvars, and
-        # contextvars do NOT automatically propagate into a NEW OS thread
-        # the way they do into an asyncio task -- a bare `executor.map`
-        # would run each grade() call in a thread with a fresh, EMPTY
-        # context, so each parallel grading generation would show up in
-        # Langfuse as its own orphaned root trace instead of nesting under
-        # this request's actual agent_run/traced_llm_call span tree. Capturing
-        # the context HERE (on the calling thread, before dispatch) and
-        # running each task inside that captured context via ctx.run(...)
-        # is what keeps the grading calls correctly nested.
-        ctx = contextvars.copy_context()
+    # Each task gets its OWN context copy, captured here on the calling
+    # thread before dispatch. A single shared copy_context() reused across
+    # worker threads was the bug: contextvars.Context.run() is not safe to
+    # call concurrently on the same Context object from multiple threads --
+    # doing so raises "cannot enter context: ... is already entered" as
+    # soon as two threads race to run() it at once.
+        contexts = [contextvars.copy_context() for _ in chunks]
         with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
-            verdicts = list(executor.map(lambda c: ctx.run(self.grade, question, c), chunks))
+            verdicts = list(executor.map(
+                lambda pair: pair[0].run(self.grade, question, pair[1]),
+                zip(contexts, chunks),
+            ))
         return [c for c, is_relevant in zip(chunks, verdicts) if is_relevant]
+            
 
 
 if __name__ == "__main__":
