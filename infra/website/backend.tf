@@ -2,7 +2,7 @@
 #
 # Points at the bucket/table created by infra/bootstrap/main.tf.
 # Same Terraform limitation as before: backend blocks can't use variables,
-# so this has to be a literal value matching bootstrap's output exactly.
+# so this has to be a literal value matching bootstrap's output exactly. this will be done. 
 
 terraform {
   backend "s3" {
