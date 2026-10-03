@@ -32,6 +32,20 @@ building this version specifically:
      `propagate_attributes()` context manager -- not a client method.
      Re-verify against the installed version's actual API if this chassis
      is revisited later, rather than trusting these import paths blindly.
+
+FAIL-OPEN DESIGN -- added after a real production incident: every entry
+point below (agent_run, traced_llm_call, traced_tool_call) wraps its
+Langfuse/OTel instrumentation in try/except and falls back to running the
+real, untraced code on failure. This was NOT the original design -- it was
+added after a Lambda deploy where a corrupted/stuck `contextvars.Context`
+(most likely from Lambda freezing an OTel background export thread
+mid-operation between invocations on a warm container) caused
+`RuntimeError: cannot enter context: <Context ...> is already entered` to
+propagate out of the tracing layer and take down every actual chat
+request -- observability took down the product it was meant to observe.
+Tracing must never be able to do that again: every call here either
+succeeds and traces, or fails and silently falls back to the untraced
+call. A broken trace is an acceptable loss; a broken chat response is not.
 """
 
 from contextlib import contextmanager
@@ -63,13 +77,26 @@ def traced_llm_call(call_type: str):
     generation also inherits the agent_name tag/metadata that block sets
     up -- without that, the call is still traced, just not attributable
     to any one agent in cross-agent comparisons.
+
+    Fail-open: if the Langfuse/OTel instrumentation itself throws (see this
+    module's docstring), falls back to calling func() directly, untraced,
+    rather than losing the actual LLM response.
     """
     def decorator(func):
         @observe(name=call_type, as_type="generation")
-        def wrapper(*args, **kwargs):
+        def traced(*args, **kwargs):
             result = func(*args, **kwargs)
-            get_client().update_current_generation(metadata={"call_type": call_type})
+            try:
+                get_client().update_current_generation(metadata={"call_type": call_type})
+            except Exception:
+                pass
             return result
+
+        def wrapper(*args, **kwargs):
+            try:
+                return traced(*args, **kwargs)
+            except Exception:
+                return func(*args, **kwargs)
         return wrapper
     return decorator
 
@@ -84,9 +111,18 @@ def traced_agent_step(step_name: str):
     made a bad decision" from "the agent decided correctly but the tool it
     called failed" -- collapsing both into one generic trace would lose
     exactly that distinction.
+
+    Fail-open, same reasoning as traced_llm_call above.
     """
     def decorator(func):
-        return observe(name=step_name, as_type="agent")(func)
+        traced = observe(name=step_name, as_type="agent")(func)
+
+        def wrapper(*args, **kwargs):
+            try:
+                return traced(*args, **kwargs)
+            except Exception:
+                return func(*args, **kwargs)
+        return wrapper
     return decorator
 
 
@@ -96,9 +132,18 @@ def traced_tool_call(tool_name: str):
     Langfuse observation type, same reasoning as traced_agent_step above:
     keeping "the agent decided to use this tool" and "the tool itself ran
     and returned X" as separate, identifiable spans in the trace.
+
+    Fail-open, same reasoning as traced_llm_call above.
     """
     def decorator(func):
-        return observe(name=tool_name, as_type="tool")(func)
+        traced = observe(name=tool_name, as_type="tool")(func)
+
+        def wrapper(*args, **kwargs):
+            try:
+                return traced(*args, **kwargs)
+            except Exception:
+                return func(*args, **kwargs)
+        return wrapper
     return decorator
 
 
@@ -130,6 +175,11 @@ def agent_run(agent_name: str, session_id: str | None = None, user_id: str | Non
     you ALSO group by "this visitor's whole conversation" (ties into the
     twin website's existing session_id) or "this specific end user" --
     independent dimensions from "which agent handled it."
+
+    Fail-open: if entering the Langfuse/OTel context managers throws (see
+    this module's docstring for why), yields None instead of propagating --
+    the caller's code inside the `with` block still runs normally, just
+    untraced for this request.
 
     Usage (wraps the whole pipeline.answer() call in the twin website, or
     the whole graph-query flow in agent-25):
@@ -167,6 +217,9 @@ def current_trace_id() -> str | None:
             result = graph_pipeline.answer(question)
         # trace_id is still usable after exiting -- it's just a plain
         # string now, no longer tied to the (now-closed) span
+
+    Fail-open: returns None rather than raising if the client/context is
+    in a broken state (see this module's docstring).
     """
     try:
         return get_client().get_current_trace_id()
@@ -174,8 +227,20 @@ def current_trace_id() -> str | None:
         return None
 
 
-
 def flush():
+    """Langfuse batches and sends traces asynchronously -- in a
+    short-lived process (a script, a Lambda invocation) that exits right
+    after its work is done, un-flushed traces can be lost entirely if the
+    process ends before the background sender gets to them. Call this at
+    the end of any such process, same principle as flushing a file buffer
+    before closing it.
+
+    Fail-open: this is called unconditionally from a `finally:` block in
+    lambda_handler.py. If flush() itself raised, that exception would
+    override and discard whatever response was about to be returned to
+    the client (Python's finally-after-return semantics) -- so a tracing
+    failure here must never propagate.
+    """
     try:
         get_client().flush()
     except Exception:
