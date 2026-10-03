@@ -67,7 +67,10 @@ jobs:
             -target=aws_ecr_repository.twin_chat \
             -var="domain_name=${{ vars.DOMAIN_NAME }}" \
             -var="anthropic_api_key=${{ secrets.ANTHROPIC_API_KEY }}" \
-            -var="vector_bucket_name=${{ vars.VECTOR_BUCKET_NAME }}"
+            -var="vector_bucket_name=${{ vars.VECTOR_BUCKET_NAME }}" \
+            -var="langfuse_public_key=${{ vars.LANGFUSE_PUBLIC_KEY }}" \
+            -var="langfuse_secret_key=${{ secrets.LANGFUSE_SECRET_KEY }}" \
+            -var="langfuse_host=${{ vars.LANGFUSE_HOST }}"
 
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr_login
@@ -112,7 +115,10 @@ jobs:
           terraform apply -auto-approve \
             -var="domain_name=${{ vars.DOMAIN_NAME }}" \
             -var="anthropic_api_key=${{ secrets.ANTHROPIC_API_KEY }}" \
-            -var="vector_bucket_name=${{ vars.VECTOR_BUCKET_NAME }}"
+            -var="vector_bucket_name=${{ vars.VECTOR_BUCKET_NAME }}" \
+            -var="langfuse_public_key=${{ vars.LANGFUSE_PUBLIC_KEY }}" \
+            -var="langfuse_secret_key=${{ secrets.LANGFUSE_SECRET_KEY }}" \
+            -var="langfuse_host=${{ vars.LANGFUSE_HOST }}"
 
       - name: Get Terraform outputs
         id: tf_outputs

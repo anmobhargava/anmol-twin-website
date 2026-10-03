@@ -38,6 +38,10 @@ from pipeline import TwinRAGPipeline
 # no growth to the deployment package's size.
 import boto3
 
+from chassis.tracing import agent_run, current_trace_id, flush as langfuse_flush
+
+AGENT_NAME = "twin-website"
+
 VECTOR_BUCKET = os.environ.get("VECTOR_BUCKET")
 CONVERSATION_LOG_BUCKET = os.environ.get("CONVERSATION_LOG_BUCKET")
 _s3_client = boto3.client("s3") if CONVERSATION_LOG_BUCKET else None
@@ -163,40 +167,60 @@ def handler(event: dict, context) -> dict:
         if not question:
             return _response(400, {"error": "Missing 'message' field"})
 
+        trace_id = None
         try:
-            # History comes from S3, not the client -- the client only
-            # needs to remember its session_id (in localStorage), not
-            # replay the whole conversation on every request.
-            history = _load_session(session_id)
+            # agent_run tags every trace/observation created inside this
+            # block (every traced_llm_call in pipeline.py/hyde.py/
+            # corrective_rag.py, every traced_tool_call in
+            # hybrid_retrieval.py) with AGENT_NAME and this session_id --
+            # see chassis/tracing.py's own docstring for why that's a tag
+            # AND metadata, not just one or the other.
+            with agent_run(AGENT_NAME, session_id=session_id):
+                trace_id = current_trace_id()
 
-            pipeline = _get_pipeline()
-            result = pipeline.answer(question, history=history)
+                # History comes from S3, not the client -- the client only
+                # needs to remember its session_id (in localStorage), not
+                # replay the whole conversation on every request.
+                history = _load_session(session_id)
 
-            # Save failures are isolated from the actual response -- a
-            # recruiter should never see an error just because S3 hiccupped.
-            try:
-                _save_session(session_id, history, question, result.answer)
-            except Exception as save_err:
-                _log_event("session_save_failed", error=str(save_err))
+                pipeline = _get_pipeline()
+                result = pipeline.answer(question, history=history)
 
-            _log_event(
-                "chat_request",
-                session_id=session_id,
-                cache_hit=result.from_cache,
-                sources_used=len(result.sources),
-                latency_ms=round((time.time() - request_start) * 1000),
-            )
+                # Save failures are isolated from the actual response -- a
+                # recruiter should never see an error just because S3 hiccupped.
+                try:
+                    _save_session(session_id, history, question, result.answer)
+                except Exception as save_err:
+                    _log_event("session_save_failed", error=str(save_err))
 
-            return _response(200, {
-                "reply": result.answer,
-                "from_cache": result.from_cache,
-            })
+                _log_event(
+                    "chat_request",
+                    session_id=session_id,
+                    cache_hit=result.from_cache,
+                    sources_used=len(result.sources),
+                    latency_ms=round((time.time() - request_start) * 1000),
+                    trace_id=trace_id,  # cross-references this CloudWatch line to the Langfuse trace
+                )
+
+                return _response(200, {
+                    "reply": result.answer,
+                    "from_cache": result.from_cache,
+                })
         except Exception as e:
             # Never leak internal exception details (stack traces, file
             # paths, API key hints) to a public-facing endpoint -- log the
             # real error server-side, return a generic message to the client.
-            _log_event("chat_request_error", session_id=session_id, error=str(e))
+            _log_event("chat_request_error", session_id=session_id, error=str(e), trace_id=trace_id)
             return _response(500, {"error": "Something went wrong processing your question. Please try again."})
+        finally:
+            # Lambda FREEZES the execution environment the instant this
+            # handler returns a value -- Langfuse batches/sends traces on a
+            # background thread, which gets no further CPU time to actually
+            # deliver this request's trace once the response is handed
+            # back, unless flushed explicitly here first. Same principle as
+            # chassis/tracing.py's flush() docstring: a short-lived process
+            # must flush before it ends, or queued traces are lost.
+            langfuse_flush()
 
     return _response(404, {"error": "Not found"})
 

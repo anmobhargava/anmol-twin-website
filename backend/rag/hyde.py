@@ -21,8 +21,17 @@ REAL retrieved chunks, not from the hypothetical one.
 """
 
 import os
+import sys
+from pathlib import Path
 
 from anthropic import Anthropic
+
+# The vendored chassis package lives at the Anmol-Twin project root.
+# Add that root so imports work both from the pipeline and when this file
+# is executed directly from any working directory.
+project_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(project_root))
+from chassis.tracing import traced_llm_call
 
 HYDE_PROMPT = """You are helping retrieve information from a person's professional \
 background corpus (resume, work history, skills). Given a question a recruiter \
@@ -41,6 +50,7 @@ class HyDEGenerator:
         self.client = client or Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         self.model = model
 
+    @traced_llm_call("hyde")
     def generate(self, question: str) -> str:
         response = self.client.messages.create(
             model=self.model,

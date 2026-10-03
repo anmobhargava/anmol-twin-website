@@ -16,10 +16,17 @@ similarity of 0.71. Ranks are always comparable regardless of the underlying
 scoring method.
 """
 
+import os
+import sys
 from pathlib import Path
 
 from rank_bm25 import BM25Okapi
 
+# chassis/ lives at backend/chassis/ (a vendored copy of tracing.py, one
+# level up from this file) -- see hyde.py's own comment for why this path
+# insert is needed for both standalone and pipeline-imported execution.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from chassis.tracing import traced_tool_call
 from chunking import Chunk, load_corpus
 from vector_store import VectorStore
 
@@ -42,6 +49,7 @@ class HybridRetriever:
         results = self.vector_store.search(query, k=k)
         return [chunk.id for chunk, _ in results]
 
+    @traced_tool_call("hybrid_retrieval")
     def search(self, query: str, k: int = 5, rrf_k: int = 60) -> list[tuple[Chunk, float]]:
         """rrf_k is RRF's smoothing constant — 60 is the standard default from
         the original RRF paper, dampening the impact of any single retriever's

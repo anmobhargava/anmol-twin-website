@@ -17,11 +17,18 @@ If ALL chunks get graded as irrelevant, we fall back to an explicit
 generation from bad context — this is the "self-RAG" abstention behavior.
 """
 
+import contextvars
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 from anthropic import Anthropic
 
+# chassis/ lives at backend/chassis/ (a vendored copy of tracing.py, one
+# level up from this file) -- see hyde.py's own comment for why this path
+# insert is needed for both standalone and pipeline-imported execution.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from chassis.tracing import traced_llm_call
 from chunking import Chunk
 
 GRADE_PROMPT = """Question: {question}
@@ -38,6 +45,7 @@ class CorrectiveGrader:
         self.client = client or Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         self.model = model
 
+    @traced_llm_call("grading")
     def grade(self, question: str, chunk: Chunk) -> bool:
         response = self.client.messages.create(
             model=self.model,
@@ -65,8 +73,21 @@ class CorrectiveGrader:
         generation prompt sees first."""
         if not chunks:
             return []
+        # contextvars.copy_context() matters here specifically because of
+        # @traced_llm_call on grade(): Langfuse's trace context (which
+        # observation is "current") is carried via Python contextvars, and
+        # contextvars do NOT automatically propagate into a NEW OS thread
+        # the way they do into an asyncio task -- a bare `executor.map`
+        # would run each grade() call in a thread with a fresh, EMPTY
+        # context, so each parallel grading generation would show up in
+        # Langfuse as its own orphaned root trace instead of nesting under
+        # this request's actual agent_run/traced_llm_call span tree. Capturing
+        # the context HERE (on the calling thread, before dispatch) and
+        # running each task inside that captured context via ctx.run(...)
+        # is what keeps the grading calls correctly nested.
+        ctx = contextvars.copy_context()
         with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
-            verdicts = list(executor.map(lambda c: self.grade(question, c), chunks))
+            verdicts = list(executor.map(lambda c: ctx.run(self.grade, question, c), chunks))
         return [c for c, is_relevant in zip(chunks, verdicts) if is_relevant]
 
 

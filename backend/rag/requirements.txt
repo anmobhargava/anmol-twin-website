@@ -3,3 +3,7 @@ numpy==1.26.4
 scikit-learn==1.5.2
 anthropic==0.40.0
 boto3>=1.36.0
+# Pinned to the exact version chassis/tracing.py was verified against
+# (API surface confirmed by direct introspection -- see that file's own
+# docstring). Only dependency the vendored backend/chassis/tracing.py needs.
+langfuse==4.15.6

@@ -223,6 +223,9 @@ resource "aws_lambda_function" "twin_chat" {
       ANTHROPIC_API_KEY       = var.anthropic_api_key
       CONVERSATION_LOG_BUCKET = aws_s3_bucket.conversation_logs.id
       VECTOR_BUCKET           = var.vector_bucket_name
+      LANGFUSE_PUBLIC_KEY     = var.langfuse_public_key
+      LANGFUSE_SECRET_KEY     = var.langfuse_secret_key
+      LANGFUSE_HOST           = var.langfuse_host
     }
   }
 }

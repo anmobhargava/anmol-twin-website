@@ -1,3 +1,6 @@
 domain_name         = "anmolbhargava.dev"
 anthropic_api_key   = "sk-ant-your-key-here"
 vector_bucket_name  = "twin-website-vectors"
+langfuse_public_key = "pk-lf-your-key-here"
+langfuse_secret_key = "sk-lf-your-key-here"
+langfuse_host       = "https://us.cloud.langfuse.com"

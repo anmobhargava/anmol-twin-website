@@ -53,3 +53,26 @@ variable "vector_bucket_name" {
   type        = string
   default     = "twin-website-vectors"
 }
+
+# --- Langfuse (chassis tracing) ---
+# Public key is NOT sensitive by Langfuse's own design (it's meant to be
+# embeddable client-side in other SDKs, same spirit as a Stripe publishable
+# key) -- kept as a plain var regardless, passed via a GitHub repo variable
+# like domain_name/vector_bucket_name, not a secret. Only the SECRET key is
+# marked sensitive.
+variable "langfuse_public_key" {
+  description = "Langfuse public API key for chassis tracing (chassis/tracing.py)."
+  type        = string
+}
+
+variable "langfuse_secret_key" {
+  description = "Langfuse secret API key for chassis tracing. Marked sensitive so it never prints in plan/apply output or gets logged."
+  type        = string
+  sensitive   = true
+}
+
+variable "langfuse_host" {
+  description = "Langfuse instance URL (e.g. https://us.cloud.langfuse.com for Langfuse Cloud, or a self-hosted URL)."
+  type        = string
+  default     = "https://us.cloud.langfuse.com"
+}

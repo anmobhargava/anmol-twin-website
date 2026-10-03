@@ -33,17 +33,19 @@ from dataclasses import dataclass
 
 from anthropic import Anthropic
 
+from chassis.tracing import traced_llm_call
+
 # rag/ modules use simple (non-package) imports internally (e.g. `from chunking
 # import Chunk`), so we add that directory to the path rather than importing
 # via a package prefix — keeps every rag/ file runnable standalone AND
 # importable from here.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "rag"))
 
-from corrective_rag import CorrectiveGrader
-from hybrid_retrieval import HybridRetriever
-from hyde import HyDEGenerator
-from semantic_cache import SemanticCache
-from vector_store import VectorStore
+from rag.corrective_rag import CorrectiveGrader
+from rag.hybrid_retrieval import HybridRetriever
+from rag.hyde import HyDEGenerator
+from rag.semantic_cache import SemanticCache
+from rag.vector_store import VectorStore
 
 ANSWER_PROMPT = """You are Anmol Bhargava's AI twin, speaking to a recruiter or \
 interviewer visiting his portfolio site. Answer the question using ONLY the \
@@ -140,6 +142,7 @@ class TwinRAGPipeline:
         self.cache = SemanticCache(self.vector_store)
         self._connected = True
 
+    @traced_llm_call("condense")
     def _condense_question(self, question: str, history: list[dict]) -> str:
         """Rewrites a follow-up question into a standalone one, using
         conversation history to resolve references like "that" or "it".
@@ -191,14 +194,7 @@ class TwinRAGPipeline:
             # I genuinely don't have information for" -- the old fixed
             # ABSTAIN_MESSAGE answered both cases identically, which read
             # as broken on something as simple as "hello".
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=200,
-                messages=[{"role": "user", "content": NO_CONTEXT_PROMPT.format(
-                    history_block=history_block, question=question,
-                )}],
-            )
-            answer = response.content[0].text.strip()
+            answer = self._generate_no_context_response(history_block, question)
         else:
             context = "\n\n---\n\n".join(c.text for c in relevant_chunks)
             # The final answer uses the REAL history and the ORIGINAL
@@ -206,14 +202,7 @@ class TwinRAGPipeline:
             # feeling like a natural continuation of the actual
             # conversation, rather than an answer to a question the
             # recruiter never literally typed.
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=400,
-                messages=[{"role": "user", "content": ANSWER_PROMPT.format(
-                    history_block=history_block, context=context, question=question,
-                )}],
-            )
-            answer = response.content[0].text.strip()
+            answer = self._generate_final_answer(history_block, context, question)
 
         self.cache.put(standalone_question, answer)
         return PipelineResult(
@@ -221,6 +210,28 @@ class TwinRAGPipeline:
             from_cache=False,
             sources=[c.id for c in relevant_chunks],
         )
+
+    @traced_llm_call("no_context_response")
+    def _generate_no_context_response(self, history_block: str, question: str) -> str:
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=200,
+            messages=[{"role": "user", "content": NO_CONTEXT_PROMPT.format(
+                history_block=history_block, question=question,
+            )}],
+        )
+        return response.content[0].text.strip()
+
+    @traced_llm_call("final_generation")
+    def _generate_final_answer(self, history_block: str, context: str, question: str) -> str:
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=400,
+            messages=[{"role": "user", "content": ANSWER_PROMPT.format(
+                history_block=history_block, context=context, question=question,
+            )}],
+        )
+        return response.content[0].text.strip()
 
 
 if __name__ == "__main__":
