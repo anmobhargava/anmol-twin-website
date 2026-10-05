@@ -41,11 +41,11 @@ from chassis.tracing import record_usage, traced_llm_call
 # importable from here.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "rag"))
 
-from rag.corrective_rag import CorrectiveGrader
-from rag.hybrid_retrieval import HybridRetriever
-from rag.hyde import HyDEGenerator
-from rag.semantic_cache import SemanticCache
-from rag.vector_store import VectorStore
+from corrective_rag import CorrectiveGrader
+from hybrid_retrieval import HybridRetriever
+from hyde import HyDEGenerator
+from semantic_cache import SemanticCache
+from vector_store import VectorStore
 
 ANSWER_PROMPT = """You are Anmol Bhargava's AI twin, speaking to a recruiter or \
 interviewer visiting his portfolio site. Answer the question using ONLY the \
@@ -92,6 +92,26 @@ this message. Handle it appropriately:
 Message: {question}
 
 Response (as Anmol, first person):"""
+
+
+# Conversation history is capped before it reaches ANY prompt. Measured from
+# real Langfuse traces: condense was sending ~4,300 input tokens (mostly
+# earlier assistant replies) to produce a ~13-token rewrite, and took 12-15s;
+# calls with ~130-270 input tokens (hyde, grading) took 0.5-1.3s. Combined
+# with final generation, full requests ran 32-41s, over API Gateway's ~29s
+# limit. Two recent turns is enough to resolve "that"/"it"/"those".
+MAX_HISTORY_MESSAGES = 4   # last 2 user/assistant turns
+MAX_HISTORY_CHARS = 300    # per message
+
+
+def _trim_history(history: list[dict]) -> list[dict]:
+    trimmed = []
+    for turn in history[-MAX_HISTORY_MESSAGES:]:
+        content = turn["content"]
+        if len(content) > MAX_HISTORY_CHARS:
+            content = content[:MAX_HISTORY_CHARS].rstrip() + "..."
+        trimmed.append({"role": turn["role"], "content": content})
+    return trimmed
 
 
 @dataclass
@@ -161,7 +181,7 @@ class TwinRAGPipeline:
         if not self._connected:
             raise RuntimeError("Call connect() before answer() -- pipeline has no index connection yet.")
 
-        history = history or []
+        history = _trim_history(history or [])
 
         # Condense to a standalone question BEFORE caching, HyDE, or
         # retrieval -- all three need to know what "that" actually refers
