@@ -48,9 +48,52 @@ succeeds and traces, or fails and silently falls back to the untraced
 call. A broken trace is an acceptable loss; a broken chat response is not.
 """
 
-from contextlib import contextmanager
+import contextvars
+from contextlib import contextmanager, ExitStack
 
 from langfuse import get_client, observe, propagate_attributes
+
+# Carries the real Anthropic response's model/token-usage from inside a
+# @traced_llm_call-decorated function out to the decorator itself, without
+# changing what those functions return (every call site currently returns
+# just the extracted answer text, e.g. `response.content[0].text.strip()`
+# -- not the raw response object). A contextvar, not a plain module global,
+# because concurrent grading calls (corrective_rag.py's ThreadPoolExecutor)
+# must each see their OWN captured usage, not clobber a shared variable.
+_last_usage = contextvars.ContextVar("_last_usage", default=None)
+
+
+def record_usage(response):
+    """Call this immediately after any `client.messages.create(...)` call
+    inside a function decorated with @traced_llm_call, e.g.:
+
+        response = self.client.messages.create(...)
+        record_usage(response)
+        return response.content[0].text.strip()
+
+    Without this, every GENERATION in Langfuse has empty modelId/
+    usageDetails/costDetails -- update_current_generation was only ever
+    being called with metadata={"call_type": ...}, never model= or
+    usage_details=, so there was nothing for Langfuse's cost/token
+    dashboards to show, confirmed by inspecting update_current_generation's
+    real signature on the installed SDK (it accepts model, usage_details,
+    cost_details directly -- Langfuse computes cost itself from
+    usage_details + model, so cost_details doesn't need setting by hand).
+
+    Fail-open, same reasoning as every other function in this module: a
+    malformed/missing .usage on the response must never break the actual
+    answer being returned.
+    """
+    try:
+        _last_usage.set({
+            "model": getattr(response, "model", None),
+            "usage_details": {
+                "input": response.usage.input_tokens,
+                "output": response.usage.output_tokens,
+            },
+        })
+    except Exception:
+        pass
 
 
 def traced_llm_call(call_type: str):
@@ -85,9 +128,15 @@ def traced_llm_call(call_type: str):
     def decorator(func):
         @observe(name=call_type, as_type="generation")
         def traced(*args, **kwargs):
+            _last_usage.set(None)  # reset -- don't leak a stale value from a previous call on this context
             result = func(*args, **kwargs)
             try:
-                get_client().update_current_generation(metadata={"call_type": call_type})
+                update_kwargs = {"metadata": {"call_type": call_type}}
+                captured = _last_usage.get()
+                if captured:
+                    update_kwargs["model"] = captured["model"]
+                    update_kwargs["usage_details"] = captured["usage_details"]
+                get_client().update_current_generation(**update_kwargs)
             except Exception:
                 pass
             return result
@@ -176,10 +225,38 @@ def agent_run(agent_name: str, session_id: str | None = None, user_id: str | Non
     twin website's existing session_id) or "this specific end user" --
     independent dimensions from "which agent handled it."
 
-    Fail-open: if entering the Langfuse/OTel context managers throws (see
+    Fail-open: if ENTERING the Langfuse/OTel context managers throws (see
     this module's docstring for why), yields None instead of propagating --
     the caller's code inside the `with` block still runs normally, just
     untraced for this request.
+
+    This used to be a single `try: ... yield root_span \\n except Exception:
+    yield None` wrapping BOTH the setup AND the caller's own code (the
+    `yield` is where the caller's `with agent_run(...):` body actually
+    runs). That looked right but was broken for exactly the case that
+    matters most: an exception raised by the CALLER's own code (e.g. the
+    contextvars collision corrective_rag.py's grading used to hit) gets
+    thrown back into this generator at the `yield` line -- and a
+    @contextmanager generator that catches an exception thrown into it and
+    then yields AGAIN (as `except Exception: yield None` does) violates the
+    one-yield contract: contextlib raises its own
+    `RuntimeError: generator didn't stop after throw()` from `__exit__`,
+    chained over the real exception, instead of either suppressing it or
+    letting it through as itself. Verified directly: reproducing that shape
+    confirms the original exception gets buried in `__context__` of a
+    different, confusing RuntimeError -- real application errors (not just
+    tracing failures) were coming out of this block looking like a tracing
+    bug. Fail-open must only cover the TRACING setup itself, never the
+    caller's business logic, which should propagate as whatever it really
+    is.
+
+    Fixed by splitting the two concerns with an ExitStack: the try/except
+    now wraps ONLY entering the two context managers (the actual
+    Langfuse/OTel setup that production incident was about). Once both
+    are entered, `yield` happens OUTSIDE any try/except of this function's
+    own, so an exception from the caller's code propagates untouched, and
+    the ExitStack still closes both context managers correctly on the way
+    out (each gets its normal chance to record the error on the span).
 
     Usage (wraps the whole pipeline.answer() call in the twin website, or
     the whole graph-query flow in agent-25):
@@ -187,18 +264,23 @@ def agent_run(agent_name: str, session_id: str | None = None, user_id: str | Non
         with agent_run("agent-25-graphrag", session_id=request_session_id):
             result = graph_pipeline.answer(question)
     """
+    stack = ExitStack()
     try:
         client = get_client()
-        with client.start_as_current_observation(name=f"{agent_name}-run") as root_span:
-            with propagate_attributes(
-                tags=[agent_name],
-                metadata={"agent_name": agent_name},
-                session_id=session_id,
-                user_id=user_id,
-            ):
-                yield root_span
+        root_span = stack.enter_context(client.start_as_current_observation(name=f"{agent_name}-run"))
+        stack.enter_context(propagate_attributes(
+            tags=[agent_name],
+            metadata={"agent_name": agent_name},
+            session_id=session_id,
+            user_id=user_id,
+        ))
     except Exception:
+        stack.close()
         yield None
+        return
+
+    with stack:
+        yield root_span
 
 
 def current_trace_id() -> str | None:

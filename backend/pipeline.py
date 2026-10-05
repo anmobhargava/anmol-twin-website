@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 from anthropic import Anthropic
 
-from chassis.tracing import traced_llm_call
+from chassis.tracing import record_usage, traced_llm_call
 
 # rag/ modules use simple (non-package) imports internally (e.g. `from chunking
 # import Chunk`), so we add that directory to the path rather than importing
@@ -154,6 +154,7 @@ class TwinRAGPipeline:
             max_tokens=150,
             messages=[{"role": "user", "content": CONDENSE_PROMPT.format(history=history_text, question=question)}],
         )
+        record_usage(response)
         return response.content[0].text.strip()
 
     def answer(self, question: str, history: list[dict] | None = None, k: int = 4) -> PipelineResult:
@@ -220,6 +221,7 @@ class TwinRAGPipeline:
                 history_block=history_block, question=question,
             )}],
         )
+        record_usage(response)
         return response.content[0].text.strip()
 
     @traced_llm_call("final_generation")
@@ -231,6 +233,7 @@ class TwinRAGPipeline:
                 history_block=history_block, context=context, question=question,
             )}],
         )
+        record_usage(response)
         return response.content[0].text.strip()
 
 
