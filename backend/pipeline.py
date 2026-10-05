@@ -41,11 +41,11 @@ from chassis.tracing import record_usage, traced_llm_call
 # importable from here.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "rag"))
 
-from corrective_rag import CorrectiveGrader
-from hybrid_retrieval import HybridRetriever
-from hyde import HyDEGenerator
-from semantic_cache import SemanticCache
-from vector_store import VectorStore
+from rag.corrective_rag import CorrectiveGrader
+from rag.hybrid_retrieval import HybridRetriever
+from rag.hyde import HyDEGenerator
+from rag.semantic_cache import SemanticCache
+from rag.vector_store import VectorStore
 
 ANSWER_PROMPT = """You are Anmol Bhargava's AI twin, speaking to a recruiter or \
 interviewer visiting his portfolio site. Answer the question using ONLY the \
