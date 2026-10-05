@@ -60,6 +60,18 @@ from langfuse import get_client, observe, propagate_attributes
 # -- not the raw response object). A contextvar, not a plain module global,
 # because concurrent grading calls (corrective_rag.py's ThreadPoolExecutor)
 # must each see their OWN captured usage, not clobber a shared variable.
+# capture_input=False on every @observe below, on purpose. Langfuse's default
+# is to serialize ALL function arguments into the trace -- and these are
+# methods, so that includes `self`. Verified from a real Langfuse export:
+#   - for TwinRAGPipeline methods (condense, final_generation,
+#     no_context_response), `self` holds the retriever, the whole in-memory
+#     corpus and BM25 index; serializing it took ~12-17s per call on a small
+#     Lambda and blew past Langfuse's field size limit. This was the fixed
+#     delay behind the 32-41s requests (the same calls take 0.5-3s when
+#     timed directly against the Anthropic API).
+#   - for HyDE/grading, `self` holds the Anthropic client, so the plaintext
+#     ANTHROPIC_API_KEY was being sent to Langfuse in every trace input.
+
 _last_usage = contextvars.ContextVar("_last_usage", default=None)
 
 
@@ -126,7 +138,7 @@ def traced_llm_call(call_type: str):
     rather than losing the actual LLM response.
     """
     def decorator(func):
-        @observe(name=call_type, as_type="generation")
+        @observe(name=call_type, as_type="generation", capture_input=False)
         def traced(*args, **kwargs):
             _last_usage.set(None)  # reset -- don't leak a stale value from a previous call on this context
             result = func(*args, **kwargs)
@@ -164,7 +176,7 @@ def traced_agent_step(step_name: str):
     Fail-open, same reasoning as traced_llm_call above.
     """
     def decorator(func):
-        traced = observe(name=step_name, as_type="agent")(func)
+        traced = observe(name=step_name, as_type="agent", capture_input=False)(func)
 
         def wrapper(*args, **kwargs):
             try:
@@ -185,7 +197,7 @@ def traced_tool_call(tool_name: str):
     Fail-open, same reasoning as traced_llm_call above.
     """
     def decorator(func):
-        traced = observe(name=tool_name, as_type="tool")(func)
+        traced = observe(name=tool_name, as_type="tool", capture_input=False)(func)
 
         def wrapper(*args, **kwargs):
             try:
