@@ -44,7 +44,7 @@ resource "aws_acm_certificate_validation" "frontend" {
 # The actual DNS record pointing your domain at CloudFront. An ALIAS record
 # (Route 53's own extension, not standard DNS) rather than a CNAME -- this
 # is required at the apex/root domain, since standard CNAMEs aren't allowed
-# there, and it's also just more efficient than a CNAME even at subdomains.
+# there, and it's also just more efficient than a CNAME even at subdomains. 
 resource "aws_route53_record" "frontend" {
   zone_id = data.aws_route53_zone.main.zone_id
   name    = var.domain_name
