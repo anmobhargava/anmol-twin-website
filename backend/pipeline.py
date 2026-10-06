@@ -33,6 +33,7 @@ from dataclasses import dataclass
 
 from anthropic import Anthropic
 
+from chassis.llm import build_client
 from chassis.tracing import record_usage, traced_llm_call
 
 # rag/ modules use simple (non-package) imports internally (e.g. `from chunking
@@ -137,7 +138,7 @@ class TwinRAGPipeline:
         materially faster model cuts real wall-clock latency without
         touching the quality of what a recruiter actually reads."""
         self.vector_bucket = vector_bucket
-        self.client = client or Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        self.client = client or build_client(os.environ["ANTHROPIC_API_KEY"])
         self.model = model
         self.fast_model = fast_model
 

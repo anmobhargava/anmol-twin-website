@@ -39,6 +39,7 @@ from pipeline import TwinRAGPipeline
 import boto3
 
 from chassis.guardrails import check_input, check_output, validate_session_id
+from chassis.llm import start_request_budget
 from chassis.rate_limit import RateLimiter
 from chassis.tracing import agent_run, current_trace_id, flush as langfuse_flush
 
@@ -224,6 +225,7 @@ def handler(event: dict, context) -> dict:
                 # replay the whole conversation on every request.
                 history = _load_session(session_id)
 
+                start_request_budget()
                 pipeline = _get_pipeline()
                 result = pipeline.answer(question, history=history)
 
