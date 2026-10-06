@@ -53,6 +53,24 @@ resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.twin_api.id
   name        = "$default" # a single default stage, no separate /prod or /dev path prefix in the URL
   auto_deploy = true
+
+  # Coarse, global backstop against bursts -- API Gateway rejects excess
+  # requests with a 429 BEFORE the Lambda is invoked, so they cost nothing.
+  # This is ONE shared bucket for all callers; the fairer per-visitor and
+  # daily-cost limits live in the Lambda (backend/chassis/rate_limit.py,
+  # backed by the DynamoDB table in lambda.tf).
+  default_route_settings {
+    throttling_burst_limit = 20
+    throttling_rate_limit  = 10
+  }
+
+  # /chat is the expensive route (several LLM calls per request), so it
+  # gets a much tighter ceiling than /health and /history.
+  route_settings {
+    route_key              = "POST /chat"
+    throttling_burst_limit = 10
+    throttling_rate_limit  = 3
+  }
 }
 
 # Grants API Gateway permission to actually invoke this specific Lambda --

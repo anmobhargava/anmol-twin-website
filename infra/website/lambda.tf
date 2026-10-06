@@ -205,6 +205,42 @@ resource "aws_iam_role_policy" "lambda_s3vectors" {
   })
 }
 
+# --- Rate-limit counters ---
+# One tiny item per (client, window). On-demand billing (no capacity to
+# size, costs pennies at this traffic), and a TTL on `expires_at` so old
+# counters delete themselves. See backend/chassis/rate_limit.py.
+resource "aws_dynamodb_table" "rate_limits" {
+  name         = "${var.project_name}-rate-limits"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+
+# UpdateItem only, scoped to this one table -- the limiter never reads,
+# scans, or deletes.
+resource "aws_iam_role_policy" "lambda_rate_limits" {
+  name = "${var.project_name}-rate-limits"
+  role = aws_iam_role.lambda_exec.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["dynamodb:UpdateItem"]
+      Resource = aws_dynamodb_table.rate_limits.arn
+    }]
+  })
+}
+
 # --- The Lambda function ---
 resource "aws_lambda_function" "twin_chat" {
   function_name = "${var.project_name}-chat"
@@ -223,6 +259,7 @@ resource "aws_lambda_function" "twin_chat" {
       ANTHROPIC_API_KEY       = var.anthropic_api_key
       CONVERSATION_LOG_BUCKET = aws_s3_bucket.conversation_logs.id
       VECTOR_BUCKET           = var.vector_bucket_name
+      RATE_LIMIT_TABLE        = aws_dynamodb_table.rate_limits.name
       LANGFUSE_PUBLIC_KEY     = var.langfuse_public_key
       LANGFUSE_SECRET_KEY     = var.langfuse_secret_key
       LANGFUSE_HOST           = var.langfuse_host

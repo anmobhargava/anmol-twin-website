@@ -38,6 +38,8 @@ from pipeline import TwinRAGPipeline
 # no growth to the deployment package's size.
 import boto3
 
+from chassis.guardrails import check_input, check_output, validate_session_id
+from chassis.rate_limit import RateLimiter
 from chassis.tracing import agent_run, current_trace_id, flush as langfuse_flush
 
 AGENT_NAME = "twin-website"
@@ -49,6 +51,11 @@ _s3_client = boto3.client("s3") if CONVERSATION_LOG_BUCKET else None
 # Module-level (not inside the handler) so this only runs once per container,
 # not once per request.
 _pipeline = None
+
+# None when RATE_LIMIT_TABLE isn't set (local runs, tests) -- rate limiting is
+# then simply off, same as S3 logging is off without CONVERSATION_LOG_BUCKET.
+RATE_LIMIT_TABLE = os.environ.get("RATE_LIMIT_TABLE")
+_rate_limiter = RateLimiter(RATE_LIMIT_TABLE) if RATE_LIMIT_TABLE else None
 
 
 def _log_event(event_type: str, **fields):
@@ -69,7 +76,7 @@ def _get_pipeline() -> TwinRAGPipeline:
     return _pipeline
 
 
-def _response(status_code: int, body: dict) -> dict:
+def _response(status_code: int, body: dict, extra_headers: dict | None = None) -> dict:
     # CORS is intentionally NOT set here. It's configured at the API Gateway
     # level instead (infra/website/api_gateway.tf) -- the standard approach
     # for HTTP APIs: API Gateway handles the OPTIONS preflight itself,
@@ -78,7 +85,7 @@ def _response(status_code: int, body: dict) -> dict:
     # here too would be redundant with, and could conflict with, that config.
     return {
         "statusCode": status_code,
-        "headers": {"Content-Type": "application/json"},
+        "headers": {"Content-Type": "application/json", **(extra_headers or {})},
         "body": json.dumps(body),
     }
 
@@ -151,6 +158,8 @@ def handler(event: dict, context) -> dict:
         session_id = (event.get("queryStringParameters") or {}).get("session_id", "")
         if not session_id:
             return _response(400, {"error": "Missing 'session_id' query parameter"})
+        if not validate_session_id(session_id):
+            return _response(400, {"error": "Invalid 'session_id'"})
         history = _load_session(session_id)
         return _response(200, {"history": history})
 
@@ -162,10 +171,42 @@ def handler(event: dict, context) -> dict:
         except json.JSONDecodeError:
             return _response(400, {"error": "Invalid JSON body"})
 
-        question = body.get("message", "").strip()
-        session_id = body.get("session_id", "unknown-session")
+        question = body.get("message", "")
+        question = question.strip() if isinstance(question, str) else ""
+        session_id = body.get("session_id", "")
         if not question:
             return _response(400, {"error": "Missing 'message' field"})
+        # session_id becomes part of an S3 key, so it must be a plain
+        # UUID-like token (the frontend sends crypto.randomUUID()). A missing
+        # id used to silently fall back to a shared "unknown-session" file,
+        # mixing every anonymous caller's history together -- now it's a 400.
+        if not validate_session_id(session_id):
+            return _response(400, {"error": "Missing or invalid 'session_id'"})
+
+        # Rate limit BEFORE any model work: a rejected request costs one
+        # DynamoDB write and nothing else.
+        source_ip = event.get("requestContext", {}).get("http", {}).get("sourceIp", "")
+        if _rate_limiter:
+            limit = _rate_limiter.check(source_ip)
+            if not limit.allowed:
+                _log_event("rate_limited", session_id=session_id, scope=limit.scope, retry_after=limit.retry_after)
+                if limit.scope == "daily_global":
+                    message = "I've hit my daily limit for chats -- please check back tomorrow, or reach me through the links on this page."
+                else:
+                    message = "You're sending messages quickly -- give me a moment and try again."
+                return _response(
+                    429,
+                    {"error": message, "retry_after": limit.retry_after},
+                    {"Retry-After": str(limit.retry_after)},
+                )
+
+        verdict = check_input(question)
+        if not verdict.allowed:
+            _log_event("guardrail_blocked", session_id=session_id, reason=verdict.reason)
+            # 200 with a normal reply (not an error status): the visitor sees
+            # a polite in-character message, and nothing is saved to the
+            # session -- so blocked text can never end up in future prompts.
+            return _response(200, {"reply": verdict.message, "from_cache": False, "blocked": True})
 
         trace_id = None
         try:
@@ -185,6 +226,11 @@ def handler(event: dict, context) -> dict:
 
                 pipeline = _get_pipeline()
                 result = pipeline.answer(question, history=history)
+
+                safe = check_output(result.answer)
+                if safe.reason:
+                    _log_event("output_guardrail", session_id=session_id, reason=safe.reason, trace_id=trace_id)
+                result.answer = safe.answer
 
                 # Save failures are isolated from the actual response -- a
                 # recruiter should never see an error just because S3 hiccupped.

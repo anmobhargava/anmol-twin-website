@@ -46,3 +46,6 @@ Thumbs.db
 # meant to be permanent, shouldn't accidentally get committed if one is
 # left behind.
 test_*.py
+# Keep the offline unit tests under backend/tests/ (the broad test_*.py rule above would hide them)
+!backend/tests/test_*.py
+!backend/tests/test_*.py
