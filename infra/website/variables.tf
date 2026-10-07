@@ -76,3 +76,15 @@ variable "langfuse_host" {
   type        = string
   default     = "https://us.cloud.langfuse.com"
 }
+
+variable "alert_email" {
+  description = "Email that receives CloudWatch alarm and budget notifications. Leave empty to create the alarms without an email subscription."
+  type        = string
+  default     = ""
+}
+
+variable "monthly_budget_usd" {
+  description = "Monthly AWS cost budget (USD); alerts at 80% actual and 100% forecast."
+  type        = number
+  default     = 25
+}

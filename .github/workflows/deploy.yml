@@ -118,7 +118,8 @@ jobs:
             -var="vector_bucket_name=${{ vars.VECTOR_BUCKET_NAME }}" \
             -var="langfuse_public_key=${{ vars.LANGFUSE_PUBLIC_KEY }}" \
             -var="langfuse_secret_key=${{ secrets.LANGFUSE_SECRET_KEY }}" \
-            -var="langfuse_host=${{ vars.LANGFUSE_HOST }}"
+            -var="langfuse_host=${{ vars.LANGFUSE_HOST }}" \
+            -var="alert_email=${{ vars.ALERT_EMAIL }}"
 
       - name: Get Terraform outputs
         id: tf_outputs
