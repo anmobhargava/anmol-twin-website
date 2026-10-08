@@ -27,3 +27,12 @@ output "cloudfront_distribution_id" {
   value       = aws_cloudfront_distribution.frontend.id
   description = "Use this for cache invalidation after uploading new frontend files: aws cloudfront create-invalidation --distribution-id <this> --paths \"/*\""
 }
+output "lambda_function_name" {
+  value       = aws_lambda_function.twin_chat.function_name
+  description = "Used by CI and scripts/rollback.sh"
+}
+
+output "lambda_version" {
+  value       = aws_lambda_function.twin_chat.version
+  description = "The version Terraform just published (the candidate CI smoke-tests before promoting)"
+}

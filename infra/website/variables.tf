@@ -88,3 +88,9 @@ variable "monthly_budget_usd" {
   type        = number
   default     = 25
 }
+
+variable "git_sha" {
+  description = "Git commit SHA being deployed. Set as the Lambda's GIT_SHA env var so every published version is traceable to a commit."
+  type        = string
+  default     = "unknown"
+}

@@ -20,7 +20,7 @@ resource "aws_ecr_repository" "twin_chat" {
 # just moves the tag pointer. Every docker push in this project (and there
 # have been many, across debugging sessions and CI runs) accumulates real,
 # ongoing storage cost with nothing ever pruning it automatically. This
-# caps the repo at the 5 most recent images -- generous headroom for
+# caps the repo at the 10 most recent images -- generous headroom for
 # rollback if ever needed, while stopping unbounded growth.
 resource "aws_ecr_lifecycle_policy" "twin_chat" {
   repository = aws_ecr_repository.twin_chat.name
@@ -28,11 +28,11 @@ resource "aws_ecr_lifecycle_policy" "twin_chat" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep only the 5 most recent images"
+      description  = "Keep only the 10 most recent images"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
-        countNumber = 5
+        countNumber = 10
       }
       action = {
         type = "expire"
@@ -254,6 +254,11 @@ resource "aws_lambda_function" "twin_chat" {
   timeout     = 60
   memory_size = 512
 
+  # Every apply that changes the function (new image digest, new GIT_SHA)
+  # publishes an immutable numbered VERSION. Versions are what the "live"
+  # alias below points at, and what makes instant rollback possible.
+  publish = true
+
   environment {
     variables = {
       ANTHROPIC_API_KEY       = var.anthropic_api_key
@@ -263,6 +268,24 @@ resource "aws_lambda_function" "twin_chat" {
       LANGFUSE_PUBLIC_KEY     = var.langfuse_public_key
       LANGFUSE_SECRET_KEY     = var.langfuse_secret_key
       LANGFUSE_HOST           = var.langfuse_host
+      GIT_SHA                 = var.git_sha
     }
+  }
+}
+
+# --- "live" alias: the stable name API Gateway calls ---
+# Traffic goes to whatever version this alias points at, NOT to $LATEST.
+# Terraform creates the alias once; after that CI moves it (see
+# .github/workflows/deploy.yml: smoke-test the new version, THEN promote)
+# and scripts/rollback.sh moves it back. ignore_changes stops later
+# `terraform apply` runs from yanking it back to the newest version, which
+# would undo a deliberate rollback and bypass the smoke test.
+resource "aws_lambda_alias" "live" {
+  name             = "live"
+  function_name    = aws_lambda_function.twin_chat.function_name
+  function_version = aws_lambda_function.twin_chat.version
+
+  lifecycle {
+    ignore_changes = [function_version]
   }
 }

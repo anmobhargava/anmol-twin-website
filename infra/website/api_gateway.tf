@@ -23,7 +23,7 @@ resource "aws_apigatewayv2_api" "twin_api" {
 resource "aws_apigatewayv2_integration" "lambda_integration" {
   api_id                 = aws_apigatewayv2_api.twin_api.id
   integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.twin_chat.invoke_arn
+  integration_uri        = aws_lambda_alias.live.invoke_arn # the alias, not $LATEST: traffic only moves when CI promotes or rolls back
   payload_format_version = "2.0" # matches the event shape lambda_handler.py expects (event["requestContext"]["http"]["method"], event["rawPath"])
 }
 
@@ -80,6 +80,7 @@ resource "aws_lambda_permission" "apigw_invoke" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.twin_chat.function_name
+  qualifier     = aws_lambda_alias.live.name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.twin_api.execution_arn}/*/*"
 }
