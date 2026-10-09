@@ -76,7 +76,6 @@ variable "langfuse_host" {
   type        = string
   default     = "https://us.cloud.langfuse.com"
 }
-
 variable "alert_email" {
   description = "Email that receives CloudWatch alarm and budget notifications. Leave empty to create the alarms without an email subscription."
   type        = string
@@ -93,4 +92,16 @@ variable "git_sha" {
   description = "Git commit SHA being deployed. Set as the Lambda's GIT_SHA env var so every published version is traceable to a commit."
   type        = string
   default     = "unknown"
+}
+
+variable "prompt_source" {
+  description = "Where the Lambda reads prompts from: \"local\" (the text baked into the image) or \"langfuse\" (the version carrying prompt_label, with local text as fallback)."
+  type        = string
+  default     = "local"
+}
+
+variable "prompt_label" {
+  description = "Langfuse label the Lambda fetches when prompt_source = langfuse."
+  type        = string
+  default     = "production"
 }

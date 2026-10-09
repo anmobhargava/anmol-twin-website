@@ -269,6 +269,8 @@ resource "aws_lambda_function" "twin_chat" {
       LANGFUSE_SECRET_KEY     = var.langfuse_secret_key
       LANGFUSE_HOST           = var.langfuse_host
       GIT_SHA                 = var.git_sha
+      PROMPT_SOURCE           = var.prompt_source # "local" (prompts from the image) or "langfuse" (versioned, see scripts/sync_prompts.py)
+      PROMPT_LABEL            = var.prompt_label
     }
   }
 }
