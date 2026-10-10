@@ -13,8 +13,11 @@ on:
       - "corpus/**"
       - "backend/**"
       - "Dockerfile"
+      - "Dockerfile.stream"
       - "frontend/**"
       - "infra/website/**"
+      - "eval/**"
+      - "scripts/**"
   workflow_dispatch:  # adds a manual "Run workflow" button in GitHub's Actions tab --
                        # lets you trigger a deploy anytime without needing an actual
                        # file change in one of the paths above
@@ -51,6 +54,26 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python build_index.py ${{ vars.VECTOR_BUCKET_NAME }}
+
+      # Quality gate: runs the golden questions in eval/golden.json through
+      # the real pipeline against the freshly built index. A failure stops
+      # the job HERE, before any image is built or Terraform applied, so a
+      # regression never reaches the live Lambda. Thresholds live in
+      # eval/golden.json. NOTE: the index above is already rebuilt at this
+      # point; the live Lambda keeps serving its previous image until the
+      # later steps run.
+      - name: Eval gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python eval/run_eval.py ${{ vars.VECTOR_BUCKET_NAME }}
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval/report.json
+          if-no-files-found: ignore
 
       # Ensures the ECR repo exists BEFORE we try to push an image to it --
       # a targeted apply, touching only this one resource. Idempotent: if
@@ -94,8 +117,25 @@ jobs:
       # this project, and the old workflow never had the fix applied.
       - name: Build and push Lambda container image
         run: |
-          docker build --provenance=false -t ${{ steps.ecr_uri.outputs.uri }}:latest .
+          # Two tags, one image: :latest is what Terraform deploys, and the
+          # commit SHA tag makes every image traceable to the exact code
+          # that built it (and keeps it findable for rollback).
+          docker build --provenance=false \
+            -t ${{ steps.ecr_uri.outputs.uri }}:latest \
+            -t ${{ steps.ecr_uri.outputs.uri }}:${{ github.sha }} .
           docker push ${{ steps.ecr_uri.outputs.uri }}:latest
+          docker push ${{ steps.ecr_uri.outputs.uri }}:${{ github.sha }}
+
+      # Second image, same repository: the streaming function (see
+      # Dockerfile.stream / infra/website/stream.tf). Tagged stream-latest
+      # (what Terraform deploys) and stream-<sha> (traceability/rollback).
+      - name: Build and push streaming image
+        run: |
+          docker build --provenance=false -f Dockerfile.stream \
+            -t ${{ steps.ecr_uri.outputs.uri }}:stream-latest \
+            -t ${{ steps.ecr_uri.outputs.uri }}:stream-${{ github.sha }} .
+          docker push ${{ steps.ecr_uri.outputs.uri }}:stream-latest
+          docker push ${{ steps.ecr_uri.outputs.uri }}:stream-${{ github.sha }}
 
       # Now that a real "latest"-tagged image exists in ECR, the full
       # apply's data.aws_ecr_image lookup (in lambda.tf) will succeed, and
@@ -119,7 +159,8 @@ jobs:
             -var="langfuse_public_key=${{ vars.LANGFUSE_PUBLIC_KEY }}" \
             -var="langfuse_secret_key=${{ secrets.LANGFUSE_SECRET_KEY }}" \
             -var="langfuse_host=${{ vars.LANGFUSE_HOST }}" \
-            -var="alert_email=${{ vars.ALERT_EMAIL }}"
+            -var="alert_email=${{ vars.ALERT_EMAIL }}" \
+            -var="git_sha=${{ github.sha }}"
 
       - name: Get Terraform outputs
         id: tf_outputs
@@ -128,6 +169,69 @@ jobs:
           echo "api_url=$(terraform output -raw api_invoke_url)" >> "$GITHUB_OUTPUT"
           echo "bucket=$(terraform output -raw frontend_bucket_name)" >> "$GITHUB_OUTPUT"
           echo "distribution_id=$(terraform output -raw cloudfront_distribution_id)" >> "$GITHUB_OUTPUT"
+          echo "function=$(terraform output -raw lambda_function_name)" >> "$GITHUB_OUTPUT"
+          echo "version=$(terraform output -raw lambda_version)" >> "$GITHUB_OUTPUT"
+          echo "stream_url=$(terraform output -raw stream_url)" >> "$GITHUB_OUTPUT"
+
+      # Gated promotion. Terraform just PUBLISHED a new immutable Lambda
+      # version but the `live` alias (what API Gateway calls) still points at
+      # the previous one -- so real visitors are untouched while we test the
+      # candidate directly. Only if it passes do we move the alias. After the
+      # move, a final check through the real API URL; if that fails, the
+      # alias is moved straight back. The previous version is never deleted.
+      - name: Smoke-test candidate, promote, auto-rollback on failure
+        env:
+          FN: ${{ steps.tf_outputs.outputs.function }}
+          NEW: ${{ steps.tf_outputs.outputs.version }}
+          API_URL: ${{ steps.tf_outputs.outputs.api_url }}
+        run: |
+          PREV=$(aws lambda get-alias --function-name "$FN" --name live --query FunctionVersion --output text)
+          echo "live version: $PREV   candidate: $NEW   commit: $GITHUB_SHA"
+
+          python scripts/smoke_test.py "$FN" "$NEW" "$GITHUB_SHA"
+
+          if [ "$PREV" = "$NEW" ]; then
+            echo "Candidate is already live (first deploy or no change). Nothing to promote."
+            exit 0
+          fi
+
+          aws lambda update-alias --function-name "$FN" --name live --function-version "$NEW"
+          echo "Promoted: live -> $NEW"
+
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "$API_URL/health" | grep -q "$GITHUB_SHA"; then
+              echo "Post-promotion health check passed."
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Post-promotion health check FAILED -- rolling back to $PREV"
+          aws lambda update-alias --function-name "$FN" --name live --function-version "$PREV"
+          exit 1
+
+      # Streaming is an enhancement, not a dependency: the frontend falls
+      # back to /chat whenever STREAM_URL is empty or the stream fails. So a
+      # broken streaming function must not block the deploy -- it just
+      # doesn't get wired into the page. Only a function that answers
+      # /health with THIS commit's SHA is exposed to visitors.
+      - name: Check streaming endpoint
+        id: stream_check
+        env:
+          STREAM_URL: ${{ steps.tf_outputs.outputs.stream_url }}
+        run: |
+          URL="${STREAM_URL%/}"
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS --max-time 10 "$URL/health" | grep -q "$GITHUB_SHA"; then
+              echo "Streaming endpoint healthy at $URL"
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "url=$URL" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::warning::Streaming endpoint did not pass its health check; deploying the site WITHOUT streaming (chat falls back to /chat)."
+          echo "ok=false" >> "$GITHUB_OUTPUT"
 
       # Injects the real API URL into config.js right before upload --
       # config.js in the repo itself keeps its REPLACE-ME placeholder, since
@@ -135,6 +239,9 @@ jobs:
       - name: Inject API URL into frontend config
         run: |
           sed -i "s|https://REPLACE-ME.execute-api.us-east-1.amazonaws.com|${{ steps.tf_outputs.outputs.api_url }}|" frontend/config.js
+          if [ "${{ steps.stream_check.outputs.ok }}" = "true" ]; then
+            sed -i 's|STREAM_URL: ""|STREAM_URL: "${{ steps.stream_check.outputs.url }}"|' frontend/config.js
+          fi
 
       - name: Deploy frontend to S3
         run: |

@@ -1,0 +1,31 @@
+# Dockerfile.stream (project root)
+#
+# Image for the STREAMING function (infra/website/stream.tf). Same backend/
+# and corpus/ as the chat image, but run as a normal web server (FastAPI +
+# uvicorn) with the AWS Lambda Web Adapter extension translating Lambda
+# invocations into HTTP requests -- that adapter is what makes response
+# streaming possible for Python.
+#
+# Deliberately a plain Python base image, not the Lambda base image: the
+# Lambda base image's entrypoint starts the Lambda runtime client, while here
+# the web server must be the main process. The adapter version is pinned to
+# the one verified in AWS's own FastAPI response-streaming example.
+FROM public.ecr.aws/docker/library/python:3.12-slim
+
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.7.2 /lambda-adapter /opt/extensions/lambda-adapter
+
+ENV AWS_LWA_INVOKE_MODE=RESPONSE_STREAM \
+    AWS_LWA_PORT=8080 \
+    PYTHONUNBUFFERED=1
+
+# Same sibling layout as the chat image (backend/ next to corpus/), so
+# lambda_handler.py's relative corpus path keeps working.
+WORKDIR /app
+COPY backend/rag/requirements.txt backend/stream_requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r stream_requirements.txt
+
+COPY backend ./backend
+COPY corpus ./corpus
+
+WORKDIR /app/backend
+CMD ["python", "-m", "uvicorn", "stream_app:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -20,8 +20,10 @@ resource "aws_ecr_repository" "twin_chat" {
 # just moves the tag pointer. Every docker push in this project (and there
 # have been many, across debugging sessions and CI runs) accumulates real,
 # ongoing storage cost with nothing ever pruning it automatically. This
-# caps the repo at the 10 most recent images -- generous headroom for
-# rollback if ever needed, while stopping unbounded growth.
+# caps the repo at the 20 most recent images -- generous headroom for
+# rollback if ever needed, while stopping unbounded growth. (Each deploy
+# now pushes TWO images -- the chat image and the streaming image, see
+# stream.tf -- so 20 keeps the same ~10 deploys of history 10 used to.)
 resource "aws_ecr_lifecycle_policy" "twin_chat" {
   repository = aws_ecr_repository.twin_chat.name
 
@@ -32,7 +34,7 @@ resource "aws_ecr_lifecycle_policy" "twin_chat" {
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
-        countNumber = 10
+        countNumber = 20
       }
       action = {
         type = "expire"
@@ -241,6 +243,24 @@ resource "aws_iam_role_policy" "lambda_rate_limits" {
   })
 }
 
+# Environment shared by the chat function and the streaming function
+# (stream.tf). One definition so a new variable can't be added to one and
+# forgotten on the other.
+locals {
+  app_env = {
+    ANTHROPIC_API_KEY       = var.anthropic_api_key
+    CONVERSATION_LOG_BUCKET = aws_s3_bucket.conversation_logs.id
+    VECTOR_BUCKET           = var.vector_bucket_name
+    RATE_LIMIT_TABLE        = aws_dynamodb_table.rate_limits.name
+    LANGFUSE_PUBLIC_KEY     = var.langfuse_public_key
+    LANGFUSE_SECRET_KEY     = var.langfuse_secret_key
+    LANGFUSE_HOST           = var.langfuse_host
+    GIT_SHA                 = var.git_sha
+    PROMPT_SOURCE           = var.prompt_source # "local" (prompts from the image) or "langfuse" (versioned, see scripts/sync_prompts.py)
+    PROMPT_LABEL            = var.prompt_label
+  }
+}
+
 # --- The Lambda function ---
 resource "aws_lambda_function" "twin_chat" {
   function_name = "${var.project_name}-chat"
@@ -260,18 +280,7 @@ resource "aws_lambda_function" "twin_chat" {
   publish = true
 
   environment {
-    variables = {
-      ANTHROPIC_API_KEY       = var.anthropic_api_key
-      CONVERSATION_LOG_BUCKET = aws_s3_bucket.conversation_logs.id
-      VECTOR_BUCKET           = var.vector_bucket_name
-      RATE_LIMIT_TABLE        = aws_dynamodb_table.rate_limits.name
-      LANGFUSE_PUBLIC_KEY     = var.langfuse_public_key
-      LANGFUSE_SECRET_KEY     = var.langfuse_secret_key
-      LANGFUSE_HOST           = var.langfuse_host
-      GIT_SHA                 = var.git_sha
-      PROMPT_SOURCE           = var.prompt_source # "local" (prompts from the image) or "langfuse" (versioned, see scripts/sync_prompts.py)
-      PROMPT_LABEL            = var.prompt_label
-    }
+    variables = local.app_env
   }
 }
 

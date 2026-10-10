@@ -7,11 +7,12 @@ the same dashboard as cost/latency/tokens, not a parallel spreadsheet.
 Judge model: OpenAI (ChatOpenAI + OpenAIEmbeddings), not Anthropic --
 RAGAS's metrics need an LLM to judge "is this faithful to the context?"
 and an embedding model for semantic-similarity metrics (answer relevancy).
-Using a different provider than the twin website's own Claude calls is
+Using a different provider than the twin website's own Claude calls is . lets see
 deliberate, not an oversight: it avoids the judge model grading its own
 homework with the exact same weights/biases as the model being judged.
 
 DEPENDENCY WARNING -- read before touching requirements:
+ragas will help resolve the issue. 
 The latest ragas (0.4.x as of this writing) has a BROKEN install: it
 unconditionally imports `langchain_community.chat_models.vertexai`, which
 newer langchain-community releases no longer ship (Google's Vertex AI

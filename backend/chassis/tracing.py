@@ -75,7 +75,7 @@ from langfuse import get_client, observe, propagate_attributes
 _last_usage = contextvars.ContextVar("_last_usage", default=None)
 
 
-def record_usage(response):
+def record_usage(response, prompt=None):
     """Call this immediately after any `client.messages.create(...)` call
     inside a function decorated with @traced_llm_call, e.g.:
 
@@ -103,6 +103,9 @@ def record_usage(response):
                 "input": response.usage.input_tokens,
                 "output": response.usage.output_tokens,
             },
+            # Langfuse prompt object (None when local text was used) -- lets
+            # the generation link to the exact prompt version.
+            "prompt": getattr(prompt, "lf", None),
         })
     except Exception:
         pass
@@ -148,6 +151,8 @@ def traced_llm_call(call_type: str):
                 if captured:
                     update_kwargs["model"] = captured["model"]
                     update_kwargs["usage_details"] = captured["usage_details"]
+                    if captured.get("prompt") is not None:
+                        update_kwargs["prompt"] = captured["prompt"]
                 get_client().update_current_generation(**update_kwargs)
             except Exception:
                 pass

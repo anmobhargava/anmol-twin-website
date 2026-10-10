@@ -149,7 +149,7 @@ def handler(event: dict, context) -> dict:
     # itself, and never reach this Lambda at all.
 
     if path.endswith("/health"):
-        return _response(200, {"status": "healthy"})
+        return _response(200, {"status": "healthy", "version": os.environ.get("GIT_SHA", "unknown")})
 
     # Called once on page load so a returning visitor (recognized via a
     # session_id persisted in the browser's localStorage) sees their prior

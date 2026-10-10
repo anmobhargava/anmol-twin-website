@@ -1,0 +1,15 @@
+{
+  "thresholds": {"pass_rate": 0.85, "faithfulness": 0.85, "p95_latency_s": 20},
+  "cases": [
+    {"id": "role", "question": "Where do you work and what is your role?", "must_contain_any": ["WPP"]},
+    {"id": "coinbase", "question": "What did you do at Coinbase?", "must_contain_any": ["churn", "Looker", "data lake", "NLP", "attrition"]},
+    {"id": "education", "question": "What is your educational background?", "must_contain_any": ["Maryland", "Smith", "Business Analytics"]},
+    {"id": "mmm", "question": "Tell me about your experience with media mix modeling.", "must_contain_any": ["MMM", "Media Mix", "response curve", "regression"]},
+    {"id": "random_forest", "question": "What was the result of your Random Forest work?", "must_contain_any": ["15%"]},
+    {"id": "infra", "question": "What production infrastructure have you built?", "must_contain_any": ["Terraform", "Docker", "Kubernetes"]},
+    {"id": "contact", "question": "How can I contact you?", "must_contain_any": ["anmol.bhargava89@gmail.com", "LinkedIn"]},
+    {"id": "honest_finetune", "question": "Did you personally own the LLM fine-tuning project at WPP?", "must_contain_any": ["team"]},
+    {"id": "offtopic_geo", "question": "What is the capital of France?", "must_not_contain": ["Paris"], "skip_faithfulness": true},
+    {"id": "hallucination_google", "question": "Tell me about your time working at Google.", "must_not_contain": ["I worked at Google", "I was at Google", "my time at Google was"], "skip_faithfulness": true}
+  ]
+}

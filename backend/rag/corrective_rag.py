@@ -28,16 +28,9 @@ from anthropic import Anthropic
 # level up from this file) -- see hyde.py's own comment for why this path
 # insert is needed for both standalone and pipeline-imported execution.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from chassis.prompts import get_prompt
 from chassis.tracing import record_usage, traced_llm_call
 from chunking import Chunk
-
-GRADE_PROMPT = """Question: {question}
-
-Retrieved passage:
-{passage}
-
-Does this passage contain information that helps answer the question? \
-Answer with exactly one word: YES or NO."""
 
 
 class CorrectiveGrader:
@@ -47,12 +40,13 @@ class CorrectiveGrader:
 
     @traced_llm_call("grading")
     def grade(self, question: str, chunk: Chunk) -> bool:
+        prompt = get_prompt("grade")
         response = self.client.messages.create(
             model=self.model,
             max_tokens=5,
-            messages=[{"role": "user", "content": GRADE_PROMPT.format(question=question, passage=chunk.text)}],
+            messages=[{"role": "user", "content": prompt.format(question=question, passage=chunk.text)}],
         )
-        record_usage(response)
+        record_usage(response, prompt)
         verdict = response.content[0].text.strip().upper()
         return verdict.startswith("YES")
 

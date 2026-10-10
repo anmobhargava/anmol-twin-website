@@ -49,3 +49,4 @@ test_*.py
 # Keep the offline unit tests under backend/tests/ (the broad test_*.py rule above would hide them)
 !backend/tests/test_*.py
 !backend/tests/test_*.py
+eval/report.json

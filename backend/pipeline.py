@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from anthropic import Anthropic
 
 from chassis.llm import build_client
+from chassis.prompts import get_prompt
 from chassis.tracing import record_usage, traced_llm_call
 
 # rag/ modules use simple (non-package) imports internally (e.g. `from chunking
@@ -48,52 +49,6 @@ from rag.hyde import HyDEGenerator
 from rag.semantic_cache import SemanticCache
 from rag.vector_store import VectorStore
 
-ANSWER_PROMPT = """You are Anmol Bhargava's AI twin, speaking to a recruiter or \
-interviewer visiting his portfolio site. Answer the question using ONLY the \
-context provided below. Speak in first person, as Anmol. Keep the tone \
-professional but approachable, per Anmol's own communication style. If the \
-context doesn't contain enough to answer, say so honestly rather than \
-guessing or inventing details.
-
-{history_block}
-Context:
-{context}
-
-Question: {question}
-
-Answer (as Anmol, first person):"""
-
-CONDENSE_PROMPT = """Given this conversation history and a follow-up question, \
-rewrite the follow-up as a standalone question that makes sense without the \
-history -- resolve any pronouns or references (e.g. "that", "it", "those") to \
-what they actually refer to. If the follow-up is already standalone, return it \
-unchanged. Return ONLY the rewritten question, nothing else.
-
-Conversation history:
-{history}
-
-Follow-up question: {question}
-
-Standalone question:"""
-
-NO_CONTEXT_PROMPT = """You are Anmol Bhargava's AI twin, speaking to a recruiter or \
-interviewer visiting his portfolio site. No specific background content matched \
-this message. Handle it appropriately:
-
-- If this is casual conversation (a greeting like "hi"/"hello", small talk, thanks, \
-  a farewell), respond warmly and naturally as Anmol would -- e.g. greet them back \
-  and invite them to ask about his background, WPP Media / marketing analytics work, \
-  or the AI/ML projects he's been building. Do NOT say "I don't have information" \
-  to a simple greeting -- that reads as broken, not honest.
-- If this is a genuine, specific question about Anmol's background/experience that \
-  you have no grounded information for, say so honestly -- don't guess or invent \
-  details -- and suggest what topics you CAN help with.
-
-{history_block}
-Message: {question}
-
-Response (as Anmol, first person):"""
-
 
 # Conversation history is capped before it reaches ANY prompt. Measured from
 # real Langfuse traces: condense was sending ~4,300 input tokens (mostly
@@ -101,8 +56,8 @@ Response (as Anmol, first person):"""
 # calls with ~130-270 input tokens (hyde, grading) took 0.5-1.3s. Combined
 # with final generation, full requests ran 32-41s, over API Gateway's ~29s
 # limit. Two recent turns is enough to resolve "that"/"it"/"those".
-MAX_HISTORY_MESSAGES = 4   # last 2 user/assistant turns
-MAX_HISTORY_CHARS = 300    # per message
+MAX_HISTORY_MESSAGES = 10   # last 2 user/assistant turns
+MAX_HISTORY_CHARS = 500    # per message
 
 
 def _trim_history(history: list[dict]) -> list[dict]:
@@ -120,6 +75,17 @@ class PipelineResult:
     answer: str
     from_cache: bool
     sources: list[str]  # chunk/node ids actually used, for debugging/transparency
+
+
+@dataclass
+class _Plan:
+    """What _prepare() decided: a cache hit, or the material for generation
+    (context is None when nothing relevant was retrieved)."""
+    standalone_question: str
+    cached: str | None = None
+    history_block: str = ""
+    context: str | None = None
+    sources: list[str] | None = None
 
 
 class TwinRAGPipeline:
@@ -170,15 +136,19 @@ class TwinRAGPipeline:
         Only called when history is non-empty -- with no history, the
         question is already standalone by definition."""
         history_text = "\n".join(f"{turn['role']}: {turn['content']}" for turn in history)
+        prompt = get_prompt("condense")
         response = self.client.messages.create(
             model=self.fast_model,
             max_tokens=150,
-            messages=[{"role": "user", "content": CONDENSE_PROMPT.format(history=history_text, question=question)}],
+            messages=[{"role": "user", "content": prompt.format(history=history_text, question=question)}],
         )
-        record_usage(response)
+        record_usage(response, prompt)
         return response.content[0].text.strip()
 
-    def answer(self, question: str, history: list[dict] | None = None, k: int = 4) -> PipelineResult:
+    def _prepare(self, question: str, history: list[dict] | None, k: int) -> "_Plan":
+        """Everything BEFORE the final text is generated: condense, cache
+        lookup, HyDE, retrieval, grading. Shared by answer() and
+        answer_stream() so the two cannot drift apart."""
         if not self._connected:
             raise RuntimeError("Call connect() before answer() -- pipeline has no index connection yet.")
 
@@ -195,7 +165,7 @@ class TwinRAGPipeline:
 
         cached = self.cache.get(standalone_question)
         if cached is not None:
-            return PipelineResult(answer=cached, from_cache=True, sources=[])
+            return _Plan(standalone_question=standalone_question, cached=cached)
 
         hypothetical_doc = self.hyde.generate(standalone_question)
         retrieved = self.retriever.search(hypothetical_doc, k=k)
@@ -208,7 +178,20 @@ class TwinRAGPipeline:
             history_text = "\n".join(f"{turn['role']}: {turn['content']}" for turn in history)
             history_block = f"Conversation so far:\n{history_text}\n"
 
-        if not relevant_chunks:
+        context = "\n\n---\n\n".join(c.text for c in relevant_chunks) if relevant_chunks else None
+        return _Plan(
+            standalone_question=standalone_question,
+            history_block=history_block,
+            context=context,
+            sources=[c.id for c in relevant_chunks],
+        )
+
+    def answer(self, question: str, history: list[dict] | None = None, k: int = 4) -> PipelineResult:
+        plan = self._prepare(question, history, k)
+        if plan.cached is not None:
+            return PipelineResult(answer=plan.cached, from_cache=True, sources=[])
+
+        if plan.context is None:
             # No grounded content matched -- but that doesn't mean a rigid
             # canned string is the right response. A real LLM call here
             # (still constrained to NOT invent specific facts) can tell
@@ -216,45 +199,100 @@ class TwinRAGPipeline:
             # I genuinely don't have information for" -- the old fixed
             # ABSTAIN_MESSAGE answered both cases identically, which read
             # as broken on something as simple as "hello".
-            answer = self._generate_no_context_response(history_block, question)
+            answer = self._generate_no_context_response(plan.history_block, question)
         else:
-            context = "\n\n---\n\n".join(c.text for c in relevant_chunks)
             # The final answer uses the REAL history and the ORIGINAL
             # question (not the condensed one) -- this keeps the reply
             # feeling like a natural continuation of the actual
             # conversation, rather than an answer to a question the
             # recruiter never literally typed.
-            answer = self._generate_final_answer(history_block, context, question)
+            answer = self._generate_final_answer(plan.history_block, plan.context, question)
 
-        self.cache.put(standalone_question, answer)
-        return PipelineResult(
-            answer=answer,
-            from_cache=False,
-            sources=[c.id for c in relevant_chunks],
-        )
+        self.cache.put(plan.standalone_question, answer)
+        return PipelineResult(answer=answer, from_cache=False, sources=plan.sources)
+
+    def answer_stream(self, question: str, on_delta, history: list[dict] | None = None,
+                      k: int = 4) -> PipelineResult:
+        """Same flow as answer(), but the final text is delivered piece by
+        piece through on_delta(text) as the model writes it. Blocking: returns
+        the complete PipelineResult at the end. Everything before the final
+        generation (condense/HyDE/grading) is unchanged and not streamed."""
+        plan = self._prepare(question, history, k)
+        if plan.cached is not None:
+            on_delta(plan.cached)
+            return PipelineResult(answer=plan.cached, from_cache=True, sources=[])
+
+        if plan.context is None:
+            answer = self._generate_no_context_response_stream(plan.history_block, question, on_delta)
+        else:
+            answer = self._generate_final_answer_stream(plan.history_block, plan.context, question, on_delta)
+
+        self.cache.put(plan.standalone_question, answer)
+        return PipelineResult(answer=answer, from_cache=False, sources=plan.sources)
+
+    def _complete(self, on_delta, **kwargs):
+        """Runs one generation, streaming when the client supports it and
+        falling back to a single create() (delivered as one chunk) when not --
+        e.g. the plain Anthropic client or test fakes."""
+        if on_delta is not None and hasattr(self.client, "stream"):
+            return self.client.stream(on_delta, **kwargs)
+        response = self.client.messages.create(**kwargs)
+        if on_delta is not None:
+            on_delta(response.content[0].text)
+        return response
 
     @traced_llm_call("no_context_response")
     def _generate_no_context_response(self, history_block: str, question: str) -> str:
+        prompt = get_prompt("no_context")
         response = self.client.messages.create(
             model=self.model,
             max_tokens=200,
-            messages=[{"role": "user", "content": NO_CONTEXT_PROMPT.format(
+            messages=[{"role": "user", "content": prompt.format(
                 history_block=history_block, question=question,
             )}],
         )
-        record_usage(response)
+        record_usage(response, prompt)
+        return response.content[0].text.strip()
+
+    @traced_llm_call("no_context_response")
+    def _generate_no_context_response_stream(self, history_block: str, question: str, on_delta) -> str:
+        prompt = get_prompt("no_context")
+        response = self._complete(
+            on_delta,
+            model=self.model,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt.format(
+                history_block=history_block, question=question,
+            )}],
+        )
+        record_usage(response, prompt)
         return response.content[0].text.strip()
 
     @traced_llm_call("final_generation")
     def _generate_final_answer(self, history_block: str, context: str, question: str) -> str:
+        prompt = get_prompt("answer")
         response = self.client.messages.create(
             model=self.model,
             max_tokens=400,
-            messages=[{"role": "user", "content": ANSWER_PROMPT.format(
+            messages=[{"role": "user", "content": prompt.format(
                 history_block=history_block, context=context, question=question,
             )}],
         )
-        record_usage(response)
+        record_usage(response, prompt)
+        return response.content[0].text.strip()
+
+    @traced_llm_call("final_generation")
+    def _generate_final_answer_stream(self, history_block: str, context: str, question: str, on_delta) -> str:
+        prompt = get_prompt("answer")
+        response = self._complete(
+            on_delta,
+            model=self.model,
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt.format(
+                history_block=history_block, context=context, question=question,
+            )}],
+        )
+        record_usage(response, prompt)
         return response.content[0].text.strip()
 
 

@@ -32,18 +32,8 @@ from anthropic import Anthropic
 # hyde.py`, which only puts rag/ on sys.path automatically) or imported via
 # pipeline.py (which only adds rag/ itself, not backend/).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from chassis.prompts import get_prompt
 from chassis.tracing import record_usage, traced_llm_call
-
-HYDE_PROMPT = """You are helping retrieve information from a person's professional \
-background corpus (resume, work history, skills). Given a question a recruiter \
-might ask, write a brief, plausible-sounding hypothetical answer — 2-3 sentences, \
-resume/bio style — as if it were a real excerpt from that person's background. \
-It's fine if the specific facts you invent are wrong; this is used only to \
-improve semantic search, not shown to anyone. Do not add disclaimers or caveats.
-
-Question: {question}
-
-Hypothetical answer excerpt:"""
 
 
 class HyDEGenerator:
@@ -53,12 +43,13 @@ class HyDEGenerator:
 
     @traced_llm_call("hyde")
     def generate(self, question: str) -> str:
+        prompt = get_prompt("hyde")
         response = self.client.messages.create(
             model=self.model,
             max_tokens=150,
-            messages=[{"role": "user", "content": HYDE_PROMPT.format(question=question)}],
+            messages=[{"role": "user", "content": prompt.format(question=question)}],
         )
-        record_usage(response)
+        record_usage(response, prompt)
         return response.content[0].text.strip()
 
 

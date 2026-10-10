@@ -95,6 +95,50 @@ class ResilientClient:
             timeout = max(1.0, min(timeout, remaining))
         return self._client.messages.create(timeout=timeout, **kwargs)
 
+    def _stream_attempt(self, kwargs: dict, on_delta, state: dict):
+        timeout = self._timeout
+        remaining = _remaining()
+        if remaining is not None:
+            timeout = max(1.0, min(timeout, remaining))
+        with self._client.messages.stream(timeout=timeout, **kwargs) as stream:
+            for text in stream.text_stream:
+                state["sent"] = True
+                on_delta(text)
+            return stream.get_final_message()
+
+    def stream(self, on_delta, **kwargs):
+        """Like messages.create, but calls on_delta(text) for each chunk as it
+        arrives and returns the final message (for usage/model accounting).
+
+        Fallback rule: a transient failure BEFORE the first chunk was delivered
+        retries on the fallback model exactly like create(). A failure AFTER
+        text has reached the visitor is re-raised -- we cannot un-send words,
+        and silently switching models mid-sentence would splice two answers."""
+        primary = kwargs.get("model")
+        state = {"sent": False}
+        try:
+            return self._stream_attempt(kwargs, on_delta, state)
+        except Exception as exc:
+            if state["sent"] or not is_transient(exc):
+                raise
+            last_exc = exc
+
+        for fallback in self._fallbacks.get(primary, []):
+            remaining = _remaining()
+            if remaining is not None and remaining < MIN_SECONDS_FOR_ATTEMPT:
+                break
+            logger.warning(json.dumps({
+                "event": "llm_fallback", "from": primary, "to": fallback,
+                "error": type(last_exc).__name__, "streaming": True,
+            }))
+            try:
+                return self._stream_attempt({**kwargs, "model": fallback}, on_delta, state)
+            except Exception as exc:
+                if state["sent"] or not is_transient(exc):
+                    raise
+                last_exc = exc
+        raise last_exc
+
     def _create(self, **kwargs):
         primary = kwargs.get("model")
         try:
