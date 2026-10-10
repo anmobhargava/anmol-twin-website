@@ -61,7 +61,7 @@ jobs:
       # regression never reaches the live Lambda. Thresholds live in
       # eval/golden.json. NOTE: the index above is already rebuilt at this
       # point; the live Lambda keeps serving its previous image until the
-      # later steps run.
+      # later steps run. lets see if this change works.
       - name: Eval gate
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
