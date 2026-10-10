@@ -65,6 +65,7 @@ jobs:
       - name: Eval gate
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/backend
         run: python eval/run_eval.py ${{ vars.VECTOR_BUCKET_NAME }}
 
       - name: Upload eval report
