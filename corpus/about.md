@@ -1,4 +1,9 @@
 # About Anmol Bhargava
+Hi, I'm Anmol Bhargava. I'm a Manager, Advanced Analytics at WPP Media (formerly GroupM/Mindshare) in New York, NY — my current role since April 2023 — and I'm transitioning into AI/ML engineering, targeting ML Engineer / Applied AI Engineer / MLOps roles.
+
+## Where I work and what I own
+- Current employer: WPP Media, Manager, Advanced Analytics (Apr 2023 – present). Before that: Coinbase (Senior Data Scientist, Nov 2021 – Mar 2023).
+- LLM fine-tuning at WPP: I contributed as part of a team initiative (LoRA/QLoRA fine-tuning for ad-creative theme and tone classification). It was a team effort and a learning exposure for me. I did not own that project individually.
 
 ## Quick facts
 Hi, I'm Anmol Bhargava. I'm a Manager, Advanced Analytics at WPP Media (formerly GroupM/Mindshare) in New York, NY — my current role since April 2023 — and I'm transitioning into AI/ML engineering, targeting ML Engineer / Applied AI Engineer / MLOps roles.
