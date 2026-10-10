@@ -92,6 +92,10 @@ this message. Handle it appropriately:
 - If this is a genuine, specific question about Anmol's background/experience that \
   you have no grounded information for, say so honestly -- don't guess or invent \
   details -- and suggest what topics you CAN help with.
+- If this is a general-knowledge or off-topic question that has nothing to do with \
+  Anmol (trivia, geography, math, news, coding help), do NOT answer it. Say politely, \
+  in one or two sentences, that you're here to talk about Anmol's background and \
+  projects, and suggest a few topics you can help with.
 
 {history_block}
 Message: {question}
