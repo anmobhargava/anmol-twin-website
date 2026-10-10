@@ -10,6 +10,7 @@ on:
   push:
     branches: [main]
     paths:
+      - ".github/workflows/deploy.yml"
       - "corpus/**"
       - "backend/**"
       - "Dockerfile"
@@ -18,8 +19,6 @@ on:
       - "infra/website/**"
       - "eval/**"
       - "scripts/**"
-      - ".github/workflows/deploy.yml"
-      - "corpus/**"
   workflow_dispatch:  # adds a manual "Run workflow" button in GitHub's Actions tab --
                        # lets you trigger a deploy anytime without needing an actual
                        # file change in one of the paths above
@@ -63,7 +62,7 @@ jobs:
       # regression never reaches the live Lambda. Thresholds live in
       # eval/golden.json. NOTE: the index above is already rebuilt at this
       # point; the live Lambda keeps serving its previous image until the
-      # later steps run. lets see if this change works.
+      # later steps run.
       - name: Eval gate
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -224,8 +223,11 @@ jobs:
           STREAM_URL: ${{ steps.tf_outputs.outputs.stream_url }}
         run: |
           URL="${STREAM_URL%/}"
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -fsS --max-time 10 "$URL/health" | grep -q "$GITHUB_SHA"; then
+          echo "Checking $URL/health for commit $GITHUB_SHA"
+          for i in $(seq 1 20); do
+            BODY=$(curl -sS --max-time 20 -w ' [http %{http_code}]' "$URL/health" 2>&1 || true)
+            echo "attempt $i: $BODY"
+            if echo "$BODY" | grep -q "$GITHUB_SHA"; then
               echo "Streaming endpoint healthy at $URL"
               echo "ok=true" >> "$GITHUB_OUTPUT"
               echo "url=$URL" >> "$GITHUB_OUTPUT"
