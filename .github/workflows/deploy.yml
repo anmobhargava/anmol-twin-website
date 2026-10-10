@@ -18,6 +18,8 @@ on:
       - "infra/website/**"
       - "eval/**"
       - "scripts/**"
+      - ".github/workflows/deploy.yml"
+      - "corpus/**"
   workflow_dispatch:  # adds a manual "Run workflow" button in GitHub's Actions tab --
                        # lets you trigger a deploy anytime without needing an actual
                        # file change in one of the paths above
