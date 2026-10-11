@@ -74,6 +74,21 @@ from langfuse import get_client, observe, propagate_attributes
 
 _last_usage = contextvars.ContextVar("_last_usage", default=None)
 
+# Running token total for ONE request (all LLM calls: condense, HyDE, grading,
+# generation). The semantic cache stores it next to a cached answer so a later
+# cache hit can say how many tokens it saved. Holds a mutable dict; a context
+# copied for a worker thread shares the same dict.
+_usage_tally = contextvars.ContextVar("_usage_tally", default=None)
+
+
+def begin_usage_tally():
+    _usage_tally.set({"input": 0, "output": 0})
+
+
+def usage_tally_total() -> int:
+    tally = _usage_tally.get()
+    return (tally["input"] + tally["output"]) if tally else 0
+
 
 def record_usage(response, prompt=None):
     """Call this immediately after any `client.messages.create(...)` call
@@ -96,6 +111,13 @@ def record_usage(response, prompt=None):
     malformed/missing .usage on the response must never break the actual
     answer being returned.
     """
+    try:
+        tally = _usage_tally.get()
+        if tally is not None:
+            tally["input"] += response.usage.input_tokens
+            tally["output"] += response.usage.output_tokens
+    except Exception:
+        pass
     try:
         _last_usage.set({
             "model": getattr(response, "model", None),
