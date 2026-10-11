@@ -108,8 +108,10 @@ def main():
 
     pipeline = TwinRAGPipeline(vector_bucket=sys.argv[1])
     pipeline.connect()
-    pipeline.cache.get = lambda q: None      # bypass cache both ways
-    pipeline.cache.put = lambda q, a: None
+    from rag.semantic_cache import CacheLookup
+    pipeline.cache.lookup = lambda q: CacheLookup(None, "miss")   # bypass cache both ways
+    pipeline.cache.get = lambda q: None
+    pipeline.cache.put = lambda q, a, **kw: None
 
     corpus = load_corpus()
     results = []
@@ -137,6 +139,18 @@ def main():
         json.dump(report, f, indent=2)
 
     print(json.dumps({k: (round(v, 3) if isinstance(v, float) else v) for k, v in summary.items()}, indent=2))
+
+    # Experiment tracking (fail-open; never changes the gate outcome below).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import tracking
+    tracking.log_run(
+        "eval-gate",
+        tracking.default_params(job="eval_gate", n_cases=len(results)),
+        {**{k: v for k, v in summary.items() if k != "gate_failures"},
+         "gate_passed": not summary["gate_failures"]},
+        [os.path.join(os.path.dirname(os.path.abspath(__file__)), "report.json")],
+        tags={"gate": "passed" if not summary["gate_failures"] else "failed"},
+    )
     if summary["gate_failures"]:
         print("EVAL GATE FAILED:", "; ".join(summary["gate_failures"]))
         sys.exit(1)
