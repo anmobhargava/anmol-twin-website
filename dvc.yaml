@@ -1,0 +1,14 @@
+# DVC pipeline. Run `dvc repro` from the repo root (pip install "dvc[s3]").
+# Stages are local and free (no LLM calls, no AWS) so anyone can reproduce them.
+stages:
+  chunk_corpus:
+    cmd: python scripts/corpus_manifest.py
+    deps:
+      - corpus
+      - backend/rag/chunking.py
+      - scripts/corpus_manifest.py
+    outs:
+      - artifacts/chunks.jsonl
+    metrics:
+      - artifacts/corpus_metrics.json:
+          cache: false

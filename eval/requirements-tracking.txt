@@ -1,0 +1,3 @@
+# Experiment tracking for the eval jobs (eval/tracking.py). The skinny build
+# has no server/UI dependencies, which keeps the CI install small.
+mlflow-skinny==2.22.0

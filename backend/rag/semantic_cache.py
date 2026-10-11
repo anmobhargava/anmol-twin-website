@@ -19,6 +19,9 @@ as the passed-in VectorStore, different index) so cache entries and
 retrieval content never mix in a search.
 """
 
+import hashlib
+import json
+import threading
 import time
 from dataclasses import dataclass
 
@@ -30,6 +33,55 @@ class CacheEntry:
     question: str
     answer: str
     timestamp: float
+
+
+class CacheStats:
+    """In-process counters for ONE warm Lambda container (they reset on a
+    cold start and are not shared across containers). That is enough for
+    the /health snapshot; the fleet-wide numbers come from the structured
+    `cache_lookup` log lines and the CloudWatch metrics built from them."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+        self.stale = 0          # similar enough, but older than the TTL
+        self.saved_ms = 0
+        self.saved_tokens = 0
+
+    def record(self, outcome: str, saved_ms: int = 0, saved_tokens: int = 0):
+        with self._lock:
+            if outcome == "hit":
+                self.hits += 1
+                self.saved_ms += saved_ms
+                self.saved_tokens += saved_tokens
+            elif outcome == "stale":
+                self.stale += 1
+                self.misses += 1
+            else:
+                self.misses += 1
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            lookups = self.hits + self.misses
+            return {
+                "lookups": lookups,
+                "hits": self.hits,
+                "misses": self.misses,
+                "stale": self.stale,
+                "hit_rate": round(self.hits / lookups, 3) if lookups else None,
+                "saved_ms": self.saved_ms,
+                "saved_tokens": self.saved_tokens,
+            }
+
+
+@dataclass
+class CacheLookup:
+    answer: str | None
+    outcome: str            # "hit" | "miss" | "stale" | "empty"
+    similarity: float | None = None
+    saved_ms: int = 0       # how long the ORIGINAL answer took to produce
+    saved_tokens: int = 0   # how many LLM tokens the original answer used
 
 
 class SemanticCache:
@@ -53,6 +105,7 @@ class SemanticCache:
         self.index_name = index_name
         self.similarity_threshold = similarity_threshold
         self.ttl_seconds = ttl_seconds
+        self.stats = CacheStats()
         self._ensure_index_exists()
 
     def _ensure_index_exists(self):
@@ -71,7 +124,11 @@ class SemanticCache:
         except self.vector_store._s3vectors.exceptions.ConflictException:
             pass  # index already exists, nothing to do
 
-    def get(self, question: str) -> str | None:
+    def lookup(self, question: str) -> CacheLookup:
+        """Like get(), but says WHY it hit or missed and what a hit saved.
+        Every call also updates the in-process stats and prints one
+        structured `cache_lookup` JSON line (CloudWatch Logs Insights can
+        query it; no new AWS permissions needed)."""
         query_embedding = self.vector_store.embed([question])[0]
         response = self.vector_store._s3vectors.query_vectors(
             vectorBucketName=self.vector_bucket,
@@ -83,33 +140,59 @@ class SemanticCache:
         )
         results = response.get("vectors", [])
         if not results:
-            return None
+            return self._finish(CacheLookup(None, "empty"))
 
         top = results[0]
         # cosine distance -> similarity (S3 Vectors returns distance, not similarity directly)
-        similarity = 1 - top["distance"]
+        similarity = round(1 - top["distance"], 4)
         if similarity < self.similarity_threshold:
-            return None
+            return self._finish(CacheLookup(None, "miss", similarity))
 
         metadata = top["metadata"]
         if time.time() - metadata["timestamp"] > self.ttl_seconds:
-            return None  # stale entry -- treat as a miss rather than returning an outdated answer
+            # stale entry -- treat as a miss rather than returning an outdated answer
+            return self._finish(CacheLookup(None, "stale", similarity))
 
-        return metadata["answer"]
+        return self._finish(CacheLookup(
+            metadata["answer"], "hit", similarity,
+            saved_ms=int(metadata.get("gen_ms", 0)),
+            saved_tokens=int(metadata.get("gen_tokens", 0)),
+        ))
 
-    def put(self, question: str, answer: str):
+    def _finish(self, result: CacheLookup) -> CacheLookup:
+        self.stats.record(result.outcome, result.saved_ms, result.saved_tokens)
+        print(json.dumps({
+            "event": "cache_lookup",
+            "outcome": result.outcome,
+            "similarity": result.similarity,
+            "saved_ms": result.saved_ms,
+            "saved_tokens": result.saved_tokens,
+        }))
+        return result
+
+    def get(self, question: str) -> str | None:
+        return self.lookup(question).answer
+
+    def put(self, question: str, answer: str, gen_ms: int = 0, gen_tokens: int = 0):
+        """gen_ms / gen_tokens record what producing this answer cost, so a
+        later hit can report how much time and how many tokens it saved."""
         embedding = self.vector_store.embed([question])[0]
         # Key is a hash of the question text -- deterministic, so re-caching
         # the same question overwrites its own prior entry rather than
-        # accumulating duplicates.
-        key = f"cache-{abs(hash(question))}"
+        # accumulating duplicates. (sha256, NOT the builtin hash(): Python
+        # randomizes hash() per process, so every Lambda container would
+        # have produced a different key for the same question.)
+        key = "cache-" + hashlib.sha256(question.encode("utf-8")).hexdigest()[:32]
         self.vector_store._s3vectors.put_vectors(
             vectorBucketName=self.vector_bucket,
             indexName=self.index_name,
             vectors=[{
                 "key": key,
                 "data": {"float32": embedding.tolist()},
-                "metadata": {"question": question, "answer": answer, "timestamp": time.time()},
+                "metadata": {
+                    "question": question, "answer": answer, "timestamp": time.time(),
+                    "gen_ms": int(gen_ms), "gen_tokens": int(gen_tokens),
+                },
             }],
         )
 

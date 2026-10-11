@@ -29,13 +29,14 @@ of this separation, not because of any caching trick within Lambda itself.
 
 import os
 import sys
+import time
 from dataclasses import dataclass
 
 from anthropic import Anthropic
 
 from chassis.llm import build_client
 from chassis.prompts import get_prompt
-from chassis.tracing import record_usage, traced_llm_call
+from chassis.tracing import begin_usage_tally, record_usage, traced_llm_call, usage_tally_total
 
 # rag/ modules use simple (non-package) imports internally (e.g. `from chunking
 # import Chunk`), so we add that directory to the path rather than importing
@@ -75,6 +76,9 @@ class PipelineResult:
     answer: str
     from_cache: bool
     sources: list[str]  # chunk/node ids actually used, for debugging/transparency
+    contexts: list[str] | None = None  # text of the chunks the answer was grounded in (for RAGAS)
+    saved_ms: int = 0       # cache hit only: time the original answer took
+    saved_tokens: int = 0   # cache hit only: LLM tokens the original answer used
 
 
 @dataclass
@@ -83,9 +87,13 @@ class _Plan:
     (context is None when nothing relevant was retrieved)."""
     standalone_question: str
     cached: str | None = None
+    saved_ms: int = 0
+    saved_tokens: int = 0
+    started_at: float = 0.0   # when work on this request began (for gen_ms)
     history_block: str = ""
     context: str | None = None
     sources: list[str] | None = None
+    contexts: list[str] | None = None
 
 
 class TwinRAGPipeline:
@@ -153,6 +161,8 @@ class TwinRAGPipeline:
             raise RuntimeError("Call connect() before answer() -- pipeline has no index connection yet.")
 
         history = _trim_history(history or [])
+        started_at = time.time()
+        begin_usage_tally()
 
         # Condense to a standalone question BEFORE caching, HyDE, or
         # retrieval -- all three need to know what "that" actually refers
@@ -163,9 +173,14 @@ class TwinRAGPipeline:
         # actual context don't collide in the cache.
         standalone_question = self._condense_question(question, history) if history else question
 
-        cached = self.cache.get(standalone_question)
+        lookup = self.cache.lookup(standalone_question) if hasattr(self.cache, "lookup") else None
+        cached = lookup.answer if lookup is not None else self.cache.get(standalone_question)
         if cached is not None:
-            return _Plan(standalone_question=standalone_question, cached=cached)
+            return _Plan(
+                standalone_question=standalone_question, cached=cached,
+                saved_ms=lookup.saved_ms if lookup else 0,
+                saved_tokens=lookup.saved_tokens if lookup else 0,
+            )
 
         hypothetical_doc = self.hyde.generate(standalone_question)
         retrieved = self.retriever.search(hypothetical_doc, k=k)
@@ -184,12 +199,28 @@ class TwinRAGPipeline:
             history_block=history_block,
             context=context,
             sources=[c.id for c in relevant_chunks],
+            contexts=[c.text for c in relevant_chunks],
+            started_at=started_at,
         )
+
+    def _cache_put(self, plan: "_Plan", answer: str):
+        """Stores the answer together with what producing it cost, so a later
+        hit can report the time and tokens it saved. A cache write failure
+        must never fail the request the visitor is waiting on."""
+        try:
+            self.cache.put(
+                plan.standalone_question, answer,
+                gen_ms=round((time.time() - plan.started_at) * 1000),
+                gen_tokens=usage_tally_total(),
+            )
+        except Exception as e:
+            print(f"cache_put_failed: {e}")
 
     def answer(self, question: str, history: list[dict] | None = None, k: int = 4) -> PipelineResult:
         plan = self._prepare(question, history, k)
         if plan.cached is not None:
-            return PipelineResult(answer=plan.cached, from_cache=True, sources=[])
+            return PipelineResult(answer=plan.cached, from_cache=True, sources=[],
+                                  saved_ms=plan.saved_ms, saved_tokens=plan.saved_tokens)
 
         if plan.context is None:
             # No grounded content matched -- but that doesn't mean a rigid
@@ -208,8 +239,9 @@ class TwinRAGPipeline:
             # recruiter never literally typed.
             answer = self._generate_final_answer(plan.history_block, plan.context, question)
 
-        self.cache.put(plan.standalone_question, answer)
-        return PipelineResult(answer=answer, from_cache=False, sources=plan.sources)
+        self._cache_put(plan, answer)
+        return PipelineResult(answer=answer, from_cache=False, sources=plan.sources,
+                              contexts=plan.contexts or [])
 
     def answer_stream(self, question: str, on_delta, history: list[dict] | None = None,
                       k: int = 4) -> PipelineResult:
@@ -220,15 +252,17 @@ class TwinRAGPipeline:
         plan = self._prepare(question, history, k)
         if plan.cached is not None:
             on_delta(plan.cached)
-            return PipelineResult(answer=plan.cached, from_cache=True, sources=[])
+            return PipelineResult(answer=plan.cached, from_cache=True, sources=[],
+                                  saved_ms=plan.saved_ms, saved_tokens=plan.saved_tokens)
 
         if plan.context is None:
             answer = self._generate_no_context_response_stream(plan.history_block, question, on_delta)
         else:
             answer = self._generate_final_answer_stream(plan.history_block, plan.context, question, on_delta)
 
-        self.cache.put(plan.standalone_question, answer)
-        return PipelineResult(answer=answer, from_cache=False, sources=plan.sources)
+        self._cache_put(plan, answer)
+        return PipelineResult(answer=answer, from_cache=False, sources=plan.sources,
+                              contexts=plan.contexts or [])
 
     def _complete(self, on_delta, **kwargs):
         """Runs one generation, streaming when the client supports it and

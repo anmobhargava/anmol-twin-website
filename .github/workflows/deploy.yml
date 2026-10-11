@@ -63,6 +63,9 @@ jobs:
       # eval/golden.json. NOTE: the index above is already rebuilt at this
       # point; the live Lambda keeps serving its previous image until the
       # later steps run.
+      - name: Install eval tracking (MLflow)
+        run: pip install -r eval/requirements-tracking.txt
+
       - name: Eval gate
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -74,7 +77,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eval-report
-          path: eval/report.json
+          path: |
+            eval/report.json
+            mlruns
           if-no-files-found: ignore
 
       # Ensures the ECR repo exists BEFORE we try to push an image to it --

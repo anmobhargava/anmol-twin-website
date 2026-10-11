@@ -1,0 +1,9 @@
+# RAGAS evaluation job only (eval/run_ragas.py) -- NOT installed by the deploy
+# or the Lambda images. Versions verified to import together; ragas 0.4.x
+# currently fails to import against newer langchain releases, hence the pins.
+ragas==0.2.15
+langchain-anthropic<0.4
+langchain-core<0.4
+langchain-community<0.4
+langchain<0.4
+-r requirements-tracking.txt
