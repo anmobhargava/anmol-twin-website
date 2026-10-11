@@ -50,19 +50,29 @@ class HybridRetriever:
         return [chunk.id for chunk, _ in results]
 
     @traced_tool_call("hybrid_retrieval")
-    def search(self, query: str, k: int = 5, rrf_k: int = 60) -> list[tuple[Chunk, float]]:
-        """rrf_k is RRF's smoothing constant — 60 is the standard default from
+    def search(self, query: "str | list[str]", k: int = 5, rrf_k: int = 60) -> list[tuple[Chunk, float]]:
+        """`query` may be a single string or a list of strings. With a list,
+        every query is ranked by BOTH BM25 and dense search and ALL the
+        rankings are fused together by RRF -- a chunk that ranks well for
+        any of the queries (and best, for several) rises to the top.
+
+        Why a list exists: the pipeline searches with the HyDE passage (a
+        made-up answer) AND the visitor's literal question. HyDE alone can
+        drift -- for "where do you work and what is your role?" it invents a
+        generic job description that matches the wrong employer's chunks --
+        while the literal question keeps short, direct questions anchored.
+
+        rrf_k is RRF's smoothing constant — 60 is the standard default from
         the original RRF paper, dampening the impact of any single retriever's
         top rank so no one method dominates the fused result."""
+        queries = [query] if isinstance(query, str) else [q for q in query if q and q.strip()]
         candidate_pool = max(k * 3, 10)  # retrieve more from each method than we need, to give fusion real signal to work with
-        bm25_ids = self._bm25_ranked_ids(query, candidate_pool)
-        dense_ids = self._dense_ranked_ids(query, candidate_pool)
 
         rrf_scores: dict[str, float] = {}
-        for rank, chunk_id in enumerate(bm25_ids):
-            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + 1 / (rrf_k + rank + 1)
-        for rank, chunk_id in enumerate(dense_ids):
-            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + 1 / (rrf_k + rank + 1)
+        for q in queries:
+            for ranked in (self._bm25_ranked_ids(q, candidate_pool), self._dense_ranked_ids(q, candidate_pool)):
+                for rank, chunk_id in enumerate(ranked):
+                    rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + 1 / (rrf_k + rank + 1)
 
         ranked_ids = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:k]
         id_to_chunk = {c.id: c for c in self.chunks}

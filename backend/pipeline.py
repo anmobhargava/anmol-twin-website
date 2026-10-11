@@ -183,7 +183,9 @@ class TwinRAGPipeline:
             )
 
         hypothetical_doc = self.hyde.generate(standalone_question)
-        retrieved = self.retriever.search(hypothetical_doc, k=k)
+        # Search with BOTH the literal question and the HyDE passage (fused);
+        # HyDE alone can drift to the wrong chunks on short, direct questions.
+        retrieved = self.retriever.search([standalone_question, hypothetical_doc], k=k)
         candidate_chunks = [chunk for chunk, _ in retrieved]
 
         relevant_chunks = self.grader.filter_relevant(standalone_question, candidate_chunks)
@@ -280,7 +282,7 @@ class TwinRAGPipeline:
         prompt = get_prompt("no_context")
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=200,
+            max_tokens=400,
             messages=[{"role": "user", "content": prompt.format(
                 history_block=history_block, question=question,
             )}],
@@ -294,7 +296,7 @@ class TwinRAGPipeline:
         response = self._complete(
             on_delta,
             model=self.model,
-            max_tokens=200,
+            max_tokens=400,
             messages=[{"role": "user", "content": prompt.format(
                 history_block=history_block, question=question,
             )}],
@@ -307,7 +309,7 @@ class TwinRAGPipeline:
         prompt = get_prompt("answer")
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=400,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt.format(
                 history_block=history_block, context=context, question=question,
             )}],
@@ -321,7 +323,7 @@ class TwinRAGPipeline:
         response = self._complete(
             on_delta,
             model=self.model,
-            max_tokens=400,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt.format(
                 history_block=history_block, context=context, question=question,
             )}],
